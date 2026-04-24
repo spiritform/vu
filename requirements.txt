@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+Pillow
+pywebview
+pystray
+keyboard
+pywin32; sys_platform == "win32"

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VU</title>
+  <link rel="stylesheet" href="style.css?v=15" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">VU</div>
+    <div class="folder-row">
+      <input id="folder" type="text" placeholder="paste folder path…" spellcheck="false" />
+      <label class="chip">
+        <input id="recursive" type="checkbox" />
+        <span>+ sub-folders</span>
+      </label>
+      <button id="scanBtn" class="btn primary">scan</button>
+    </div>
+    <div class="meta">
+      <span id="countLabel" class="muted">—</span>
+      <button id="filterBtn" class="btn ghost" title="filter hearts (F)">
+        <span class="heart-icon">♥</span>
+        <span id="heartCount">0</span>
+      </button>
+      <span id="selChip" class="sel-chip hidden">
+        <span id="selCount">0</span>
+        <button id="clearSelBtn" class="sel-x" title="clear selection (Esc)">✕</button>
+      </span>
+      <button id="compareBtn" class="btn hidden" title="compare (C)">compare</button>
+      <button id="exportBtn" class="btn accent" title="export">export</button>
+    </div>
+  </header>
+
+  <main id="grid" class="grid"></main>
+
+  <div id="empty" class="empty hidden">
+    <div class="empty-inner">
+      <div class="empty-icon">◇</div>
+      <div class="empty-text">paste a folder path above and hit scan</div>
+    </div>
+  </div>
+
+  <!-- Lightbox -->
+  <div id="lightbox" class="lightbox hidden">
+    <div class="lb-topbar">
+      <div class="lb-info">
+        <span id="lbName"></span>
+        <span id="lbIndex" class="muted"></span>
+      </div>
+      <div class="lb-actions">
+        <button id="lbHeart" class="icon-btn" title="heart (H)">♥</button>
+        <button id="lbDelete" class="icon-btn danger" title="delete (Del)" aria-label="delete">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7h16"/>
+            <path d="M10 11v6"/>
+            <path d="M14 11v6"/>
+            <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/>
+            <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>
+          </svg>
+        </button>
+        <button id="lbClose" class="icon-btn" title="close (Esc)" aria-label="close">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <path d="M6 6l12 12"/>
+            <path d="M18 6l-12 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <button id="lbPrev" class="lb-nav lb-prev" title="prev (←)">‹</button>
+    <button id="lbNext" class="lb-nav lb-next" title="next (→)">›</button>
+    <div id="lbStage" class="lb-stage"></div>
+  </div>
+
+  <!-- Compare view -->
+  <div id="compare" class="compare hidden">
+    <div class="cmp-topbar">
+      <div class="cmp-label muted">compare</div>
+      <div class="lb-actions">
+        <button id="cmpSwap" class="icon-btn" title="swap (S)" aria-label="swap">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 8h12"/>
+            <path d="M16 5l3 3-3 3"/>
+            <path d="M17 16H5"/>
+            <path d="M8 13l-3 3 3 3"/>
+          </svg>
+        </button>
+        <button id="cmpClose" class="icon-btn" title="close (Esc)" aria-label="close">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <path d="M6 6l12 12"/>
+            <path d="M18 6l-12 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="cmp-stage">
+      <div id="cmpPaneA" class="cmp-pane"></div>
+      <div class="cmp-divider"></div>
+      <div id="cmpPaneB" class="cmp-pane"></div>
+    </div>
+  </div>
+
+  <!-- Export modal -->
+  <div id="exportModal" class="modal hidden">
+    <div class="modal-card">
+      <h3>export hearts</h3>
+      <label>subfolder name
+        <input id="exportName" type="text" value="selects" />
+      </label>
+      <label class="chip">
+        <input id="exportMove" type="checkbox" />
+        <span>move (don't copy)</span>
+      </label>
+      <div class="modal-actions">
+        <button id="exportCancel" class="btn ghost">cancel</button>
+        <button id="exportGo" class="btn accent">export images</button>
+        <button id="exportZip" class="btn accent">zip</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js?v=20"></script>
+</body>
+</html>
