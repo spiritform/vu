@@ -5,6 +5,9 @@ echo [VU] installing build dependencies...
 python -m pip install -q pyinstaller
 python -m pip install -q -r requirements.txt
 
+echo [VU] fetching ffmpeg...
+python tools\download-ffmpeg.py
+
 echo [VU] building...
 python -m PyInstaller ^
   --noconfirm ^
@@ -13,7 +16,8 @@ python -m PyInstaller ^
   --name VU ^
   --icon "assets\vu.ico" ^
   --add-data "static;static" ^
-  --collect-submodules webview ^
+  --add-data "assets;assets" ^
+  --collect-all PySide6 ^
   --collect-submodules pystray ^
   --hidden-import pystray._win32 ^
   --hidden-import keyboard ^

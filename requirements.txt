@@ -2,7 +2,7 @@ fastapi
 uvicorn
 pydantic
 Pillow
-pywebview
+PySide6
 pystray
 keyboard
 pywin32; sys_platform == "win32"

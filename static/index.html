@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>VU</title>
-  <link rel="stylesheet" href="style.css?v=15" />
+  <link rel="stylesheet" href="style.css?v=17" />
 </head>
 <body>
   <header class="topbar">
@@ -14,6 +14,10 @@
       <label class="chip">
         <input id="recursive" type="checkbox" />
         <span>+ sub-folders</span>
+      </label>
+      <label class="chip">
+        <input id="autoScan" type="checkbox" />
+        <span>auto-scan</span>
       </label>
       <button id="scanBtn" class="btn primary">scan</button>
     </div>
@@ -121,6 +125,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=20"></script>
+  <script src="app.js?v=25"></script>
 </body>
 </html>

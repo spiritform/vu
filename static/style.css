@@ -10,6 +10,7 @@
   --primary: #5b8cff;
   --danger: #ff5a5a;
   --radius: 8px;
+  --tile-size: 220px;
 }
 
 * { box-sizing: border-box; border: 0; outline: 0; }
@@ -148,7 +149,7 @@ html, body {
 /* Grid */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(var(--tile-size), 1fr));
   gap: 6px;
   padding: 10px 20px 80px;
 }
@@ -193,6 +194,9 @@ html, body {
   object-fit: cover;
   display: block;
   background: #0a0a0c;
+  /* drag/click should go to the tile div, not the img — keeps drag-out free of the
+     thumbnail bitmap that browsers auto-attach when you drag an img element */
+  pointer-events: none;
 }
 
 .tile .badge {

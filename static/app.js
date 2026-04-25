@@ -35,6 +35,55 @@ function toast(msg, kind = '') {
 }
 
 // ---------- Scan ----------
+// Non-destructive rescan — used by auto-scan to pull in newly-added files
+// without resetting selection, lightbox, or filter.
+async function refreshScan() {
+  const folder = $('folder').value.trim();
+  if (!folder) return;
+  const recursive = $('recursive').checked;
+  const res = await api('POST', '/api/scan', { folder, recursive });
+
+  const oldSelectedPaths = new Set([...state.selection].map(it => it.path));
+  const oldLbPath = state.lbIndex >= 0 && state.visible[state.lbIndex]
+    ? state.visible[state.lbIndex].path : null;
+
+  state.items = res.items;
+  state.scannedRoot = (res.root || '').replace(/\\/g, '/').toLowerCase();
+
+  applyFilter();
+
+  // restore selection by path identity
+  state.selection.clear();
+  for (const it of state.items) {
+    if (oldSelectedPaths.has(it.path)) state.selection.add(it);
+  }
+  refreshTileSelectedClasses();
+
+  // restore lightbox index if the same item still exists
+  if (oldLbPath) {
+    const idx = state.visible.findIndex(it => it.path === oldLbPath);
+    if (idx >= 0) state.lbIndex = idx;
+    else closeLightbox();
+  }
+
+  updateCount();
+}
+
+let autoScanTimer = null;
+function setAutoScan(on) {
+  if (autoScanTimer) { clearInterval(autoScanTimer); autoScanTimer = null; }
+  localStorage.setItem('autoScan', on ? '1' : '');
+  if (!on) return;
+  autoScanTimer = setInterval(async () => {
+    if (!state.scannedRoot) return;
+    // skip while overlays are open to avoid interrupting the user
+    if (!$('lightbox').classList.contains('hidden')) return;
+    if (!$('compare').classList.contains('hidden')) return;
+    if (!$('exportModal').classList.contains('hidden')) return;
+    try { await refreshScan(); } catch (_) {}
+  }, 2500);
+}
+
 async function scan() {
   const folder = $('folder').value.trim();
   if (!folder) { toast('paste a folder path first', 'error'); return; }
@@ -47,6 +96,7 @@ async function scan() {
     if (!$('exportModal').classList.contains('hidden')) closeExport();
     state.items = res.items;
     state.visible = [];
+    state.scannedRoot = (res.root || '').replace(/\\/g, '/').toLowerCase();
     state.selection.clear();
     state.lastSelected = null;
     state.lbIndex = -1;
@@ -121,24 +171,9 @@ function render() {
     const media = document.createElement('img');
     media.loading = 'lazy';
     media.src = thumbUrl(item.path);
-    media.draggable = true;
     tile.appendChild(media);
-
-    // drag-to-desktop with correct filename (Chromium browsers)
-    tile.addEventListener('dragstart', (e) => {
-      if (!e.dataTransfer) return;
-      const ext = (item.path.split('.').pop() || '').toLowerCase();
-      const mime = item.kind === 'video'
-        ? (ext === 'mov' ? 'video/quicktime' : `video/${ext}`)
-        : (ext === 'jpg' ? 'image/jpeg' : `image/${ext}`);
-      const fullUrl = new URL(fileUrl(item.path), location.href).href;
-      try {
-        e.dataTransfer.setData('DownloadURL', `${mime}:${item.name}:${fullUrl}`);
-        e.dataTransfer.setData('text/uri-list', fullUrl);
-        e.dataTransfer.setData('text/plain', fullUrl);
-      } catch (_) {}
-      e.dataTransfer.effectAllowed = 'copy';
-    });
+    // grid tiles are not draggable — drag-out is reserved for the full-screen view
+    // (img already has pointer-events: none in CSS to bypass browser auto-drag too)
 
     const actions = document.createElement('div');
     actions.className = 'tile-actions';
@@ -574,6 +609,7 @@ document.addEventListener('keydown', (e) => {
 
 // ---------- Wire up ----------
 $('scanBtn').addEventListener('click', scan);
+$('autoScan').addEventListener('change', (e) => setAutoScan(e.target.checked));
 $('filterBtn').addEventListener('click', () => {
   state.filterHearts = !state.filterHearts;
   $('filterBtn').classList.toggle('active', state.filterHearts);
@@ -610,10 +646,48 @@ document.addEventListener('mousedown', (e) => {
   if (e.shiftKey && e.target.closest('.tile')) e.preventDefault();
 });
 
-// Hook used by the pywebview host (tray/hotkey) to jump into a folder
+// Ctrl+scroll to resize tiles
+const TILE_MIN = 100;
+const TILE_MAX = 480;
+let tileSize = parseInt(localStorage.getItem('tileSize'), 10);
+if (!Number.isFinite(tileSize) || tileSize < TILE_MIN || tileSize > TILE_MAX) tileSize = 220;
+function applyTileSize() {
+  document.documentElement.style.setProperty('--tile-size', tileSize + 'px');
+}
+applyTileSize();
+document.addEventListener('wheel', (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  const step = 20;
+  const delta = e.deltaY < 0 ? step : -step;
+  const next = Math.min(TILE_MAX, Math.max(TILE_MIN, tileSize + delta));
+  if (next === tileSize) return;
+  tileSize = next;
+  applyTileSize();
+  localStorage.setItem('tileSize', String(tileSize));
+}, { passive: false });
+
+// Hook used by the host (tray/hotkey) to jump into a folder
 window.openFolder = function(folder) {
   $('folder').value = folder;
   scan();
+};
+
+// Hook used by the host when files/folders are dropped onto the window
+window.openDropped = async function(paths) {
+  if (!paths || !paths.length) return;
+  try {
+    const res = await api('POST', '/api/drop', { paths });
+    if (!res.folder) return;
+    const droppedRoot = res.folder.replace(/\\/g, '/').toLowerCase();
+    // If they're dropping files we already have loaded (e.g. drag-out of full-screen
+    // view dropped back on VU itself), don't blow away the current state.
+    if (state.scannedRoot && state.scannedRoot === droppedRoot) return;
+    $('folder').value = res.folder;
+    await scan();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 };
 
 // Restore last folder (or use ?folder= URL param if present)
@@ -628,4 +702,8 @@ if (urlFolder) {
   const last = localStorage.getItem('lastFolder');
   if (last) $('folder').value = last;
   if (localStorage.getItem('recursive')) $('recursive').checked = true;
+}
+if (localStorage.getItem('autoScan')) {
+  $('autoScan').checked = true;
+  setAutoScan(true);
 }

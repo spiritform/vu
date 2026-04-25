@@ -26,14 +26,41 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif"}
 VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".m4v"}
 MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
-HEARTS_FILE = ".hearts.json"
-THUMBS_DIR = ".thumbs"
 THUMB_SIZE = 400
+
+
+def _app_data_dir() -> Path:
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    d = base / "VU"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _folder_id(root: Path) -> str:
+    return hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:16]
 
 # Hide subprocess console windows on Windows
 _SUBPROCESS_KWARGS = {}
 if os.name == "nt":
     _SUBPROCESS_KWARGS["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
+
+def _ffmpeg_path() -> str:
+    """Return the bundled ffmpeg if present, otherwise fall back to PATH."""
+    if sys.platform == "win32":
+        cand = APP_DIR / "assets" / "ffmpeg" / "win" / "ffmpeg.exe"
+    elif sys.platform == "darwin":
+        cand = APP_DIR / "assets" / "ffmpeg" / "mac" / "ffmpeg"
+    else:
+        cand = None
+    if cand and cand.exists():
+        return str(cand)
+    return "ffmpeg"
 
 app = FastAPI()
 
@@ -41,26 +68,34 @@ app = FastAPI()
 state = {"root": None, "hidden": set()}
 
 
+def _hearts_path(root: Path) -> Path:
+    d = _app_data_dir() / "hearts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{_folder_id(root)}.json"
+
+
 def load_hearts(root: Path) -> set[str]:
-    p = root / HEARTS_FILE
+    p = _hearts_path(root)
     if not p.exists():
         return set()
     try:
-        return set(json.loads(p.read_text(encoding="utf-8")))
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return set(data.get("hearts", data) if isinstance(data, dict) else data)
     except Exception:
         return set()
 
 
 def save_hearts(root: Path, hearts: set[str]) -> None:
-    p = root / HEARTS_FILE
-    p.write_text(json.dumps(sorted(hearts), indent=2), encoding="utf-8")
+    p = _hearts_path(root)
+    payload = {"root": str(root), "hearts": sorted(hearts)}
+    p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def thumb_file(root: Path, rel: str, mtime: float, size: int) -> Path:
     key = f"{rel}|{int(mtime)}|{size}"
     h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
-    d = root / THUMBS_DIR
-    d.mkdir(exist_ok=True)
+    d = _app_data_dir() / "thumbs" / _folder_id(root)
+    d.mkdir(parents=True, exist_ok=True)
     return d / f"{h}.jpg"
 
 
@@ -79,7 +114,7 @@ def make_image_thumb(src: Path, dst: Path) -> bool:
 
 def make_video_thumb(src: Path, dst: Path) -> bool:
     cmd_base = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        _ffmpeg_path(), "-hide_banner", "-loglevel", "error",
         "-i", str(src),
         "-frames:v", "1",
         "-vf", f"scale={THUMB_SIZE}:-1:force_original_aspect_ratio=decrease",
@@ -152,9 +187,6 @@ def scan(body: ScanBody):
     for p in iterator:
         if not p.is_file():
             continue
-        parts = p.relative_to(root).parts
-        if THUMBS_DIR in parts:
-            continue
         ext = p.suffix.lower()
         if ext not in MEDIA_EXTS:
             continue
@@ -173,6 +205,22 @@ def scan(body: ScanBody):
 
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return {"root": str(root), "count": len(items), "items": items, "hidden_count": len(hidden)}
+
+
+class DropBody(BaseModel):
+    paths: list[str]
+
+
+@app.post("/api/drop")
+def drop(body: DropBody):
+    if not body.paths:
+        raise HTTPException(400, "no paths")
+    first = Path(body.paths[0])
+    if first.is_dir():
+        return {"folder": str(first.resolve())}
+    if first.exists():
+        return {"folder": str(first.parent.resolve())}
+    raise HTTPException(400, "path not found")
 
 
 @app.get("/api/file")
@@ -391,9 +439,14 @@ if __name__ == "__main__":
     import threading
     import time
     import uvicorn
-    import webview
     import pystray
     import keyboard
+
+    from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtCore import QUrl, Qt, QEvent, Signal, QTimer
+    from PySide6.QtGui import QIcon
 
     def pick_port(preferred: int = 8003) -> int:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -416,7 +469,7 @@ if __name__ == "__main__":
 
     threading.Thread(target=run_server, daemon=True).start()
 
-    # wait up to ~5s for server to come up
+    # wait for server to come up
     deadline = time.time() + 5
     while time.time() < deadline:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -433,45 +486,160 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
-    window = webview.create_window(
-        "VU",
-        f"http://127.0.0.1:{PORT}",
-        width=1400, height=900,
-    )
+    icon_path = APP_DIR / "assets" / "vu.ico"
 
-    def on_closing():
-        # hide to tray instead of destroying
-        window.hide()
-        return False  # cancel close
+    class WebView(QWebEngineView):
+        """QWebEngineView subclass that intercepts file drops onto the window."""
 
-    window.events.closing += on_closing
+        dropped = Signal(list)
 
-    def show_with_folder(folder: str | None):
-        try:
-            window.show()
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setAcceptDrops(True)
+            QTimer.singleShot(0, self._install_filter)
+
+        def _install_filter(self):
+            fp = self.focusProxy()
+            if fp is not None:
+                fp.installEventFilter(self)
+
+        def _accept_if_files(self, e) -> bool:
+            md = e.mimeData()
+            if md and md.hasUrls() and any(u.isLocalFile() for u in md.urls()):
+                e.acceptProposedAction()
+                return True
+            return False
+
+        def _emit_drop(self, e):
+            md = e.mimeData()
+            paths = [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
+            if paths:
+                self.dropped.emit(paths)
+            e.acceptProposedAction()
+
+        def eventFilter(self, obj, e):
+            t = e.type()
+            if t in (QEvent.DragEnter, QEvent.DragMove):
+                if self._accept_if_files(e):
+                    return True
+            elif t == QEvent.Drop:
+                if e.mimeData().hasUrls():
+                    self._emit_drop(e)
+                    return True
+            return super().eventFilter(obj, e)
+
+        def dragEnterEvent(self, e):
+            if not self._accept_if_files(e):
+                super().dragEnterEvent(e)
+
+        def dragMoveEvent(self, e):
+            if not self._accept_if_files(e):
+                super().dragMoveEvent(e)
+
+        def dropEvent(self, e):
+            if e.mimeData().hasUrls():
+                self._emit_drop(e)
+            else:
+                super().dropEvent(e)
+
+        def contextMenuEvent(self, event):
+            # strip navigation actions that don't belong in an embedded UI
+            menu = self.createStandardContextMenu()
+            page = self.page()
+            for action_id in (
+                QWebEnginePage.Reload,
+                QWebEnginePage.Back,
+                QWebEnginePage.Forward,
+                QWebEnginePage.Stop,
+                QWebEnginePage.ViewSource,
+                QWebEnginePage.SavePage,
+                QWebEnginePage.OpenLinkInNewTab,
+                QWebEnginePage.OpenLinkInNewWindow,
+                QWebEnginePage.OpenLinkInNewBackgroundTab,
+            ):
+                a = page.action(action_id)
+                if a is not None:
+                    a.setVisible(False)
+            menu.exec(event.globalPos())
+
+    class MainWindow(QMainWindow):
+        # cross-thread "open me with this folder" signal — empty string means just show
+        show_with_folder = Signal(str)
+
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("VU")
+            if icon_path.exists():
+                self.setWindowIcon(QIcon(str(icon_path)))
+            self.resize(1400, 900)
+            self._last_save_dir = None
+
+            self.view = WebView(self)
+            self.view.load(QUrl(f"http://127.0.0.1:{PORT}"))
+            self.setCentralWidget(self.view)
+
+            self.view.dropped.connect(self._on_dropped)
+            self.show_with_folder.connect(self._handle_show)
+
+            # Wire up downloads so "Save image as..." actually shows a dialog
+            self.view.page().profile().downloadRequested.connect(self._on_download)
+
+        def _on_download(self, dl):
+            suggested = dl.suggestedFileName() or "download"
+            last_dir = self._last_save_dir or str(Path.home() / "Downloads")
+            initial = str(Path(last_dir) / suggested)
+            file_path, _ = QFileDialog.getSaveFileName(self, "Save As", initial)
+            if not file_path:
+                dl.cancel()
+                return
+            self._last_save_dir = os.path.dirname(file_path)
+            dl.setDownloadDirectory(os.path.dirname(file_path))
+            dl.setDownloadFileName(os.path.basename(file_path))
+            dl.accept()
+
+        def closeEvent(self, e):
+            # hide to tray instead of quitting
+            e.ignore()
+            self.hide()
+
+        def _handle_show(self, folder: str):
+            self.show()
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+            self.activateWindow()
+            self.raise_()
             if folder:
-                # escape for JS
-                js = f"window.openFolder({json.dumps(folder)})"
-                window.evaluate_js(js)
-        except Exception:
-            pass
+                self.view.page().runJavaScript(
+                    f"window.openFolder({json.dumps(folder)})"
+                )
+
+        def _on_dropped(self, paths: list):
+            # Make sure window is visible when something gets dropped
+            if not self.isVisible():
+                self._handle_show("")
+            self.view.page().runJavaScript(
+                f"window.openDropped({json.dumps(paths)})"
+            )
+
+    qt_app = QApplication.instance() or QApplication(sys.argv)
+    qt_app.setQuitOnLastWindowClosed(False)
+    if icon_path.exists():
+        qt_app.setWindowIcon(QIcon(str(icon_path)))
+
+    window = MainWindow()  # starts hidden — user invokes via hotkey or tray
 
     def on_hotkey():
-        folder = _get_explorer_folder()
-        show_with_folder(folder)
+        folder = _get_explorer_folder() or ""
+        window.show_with_folder.emit(folder)
 
     def tray_open(icon, item):
-        show_with_folder(None)
+        window.show_with_folder.emit("")
 
     def tray_quit(icon, item):
         try:
-            icon.stop()
+            tray.stop()
         except Exception:
             pass
-        try:
-            window.destroy()
-        except Exception:
-            pass
+        qt_app.quit()
         os._exit(0)
 
     tray = pystray.Icon(
@@ -485,10 +653,9 @@ if __name__ == "__main__":
     )
     threading.Thread(target=tray.run, daemon=True).start()
 
-    # global hotkey
     try:
         keyboard.add_hotkey("ctrl+shift+v", on_hotkey)
     except Exception:
         pass
 
-    webview.start()
+    sys.exit(qt_app.exec())

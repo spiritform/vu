@@ -34,12 +34,12 @@ Double-click `build.bat` or run it from a terminal. Output: `dist/VU.exe`.
 ### macOS
 
 ```
-brew install ffmpeg
 chmod +x build.sh
 ./build.sh
 ```
 
-Output: `dist/VU.app`.
+Output: `dist/VU.app`. The build script downloads a static ffmpeg into the
+bundle automatically — you don't need to install it system-wide.
 
 On first launch, macOS will prompt for Accessibility permission so the global
 hotkey can register. Grant it via *System Settings → Privacy & Security →
@@ -65,9 +65,14 @@ on Mac.
 
 ## State files
 
-VU writes a couple of small sidecar files inside the scanned folder:
+VU stores everything centrally so your folders stay clean:
 
-- `.hearts.json` — list of hearted files (persists across sessions)
-- `.thumbs/`     — cached thumbnails (persists; safe to delete to regenerate)
+- Windows: `%APPDATA%\VU\`
+- macOS:   `~/Library/Application Support/VU/`
+
+Inside that directory:
+
+- `hearts/<folder-hash>.json` — hearted files for each folder you've scanned
+- `thumbs/<folder-hash>/`     — cached thumbnails (safe to delete to regenerate)
 
 "Removed from viewer" items are session-only — a fresh scan brings them back.

@@ -10,15 +10,12 @@ if ! command -v "$PY" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[VU] checking ffmpeg..."
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "  ffmpeg not found. Install with:  brew install ffmpeg"
-  echo "  (Build will continue; video thumbs won't generate without it.)"
-fi
-
 echo "[VU] installing build dependencies..."
 "$PY" -m pip install -q pyinstaller
 "$PY" -m pip install -q -r requirements.txt
+
+echo "[VU] fetching ffmpeg..."
+"$PY" tools/download-ffmpeg.py
 
 echo "[VU] generating icons..."
 "$PY" gen_icon.py || echo "  (icon generation failed — continuing without)"
@@ -36,7 +33,8 @@ echo "[VU] building..."
   --name VU \
   "${ICON_ARG[@]}" \
   --add-data "static:static" \
-  --collect-submodules webview \
+  --add-data "assets:assets" \
+  --collect-all PySide6 \
   --collect-submodules pystray \
   --hidden-import keyboard \
   --hidden-import uvicorn.logging \

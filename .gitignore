@@ -21,7 +21,10 @@ Thumbs.db
 .vscode/
 .idea/
 
-# VU runtime state (created in scanned folders, not this repo)
+# Bundled binaries (downloaded by build scripts)
+assets/ffmpeg/
+
+# Legacy VU runtime files (state is now in %APPDATA%\VU — clean these up if seen)
 .hearts.json
 .hidden.json
 .thumbs/
