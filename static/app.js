@@ -471,11 +471,17 @@ function renderLightbox() {
   stage.appendChild(el);
 }
 
+let _lastLbStepAt = 0;
 function lbStep(delta) {
   if (state.lbIndex < 0) return;
-  let next = state.lbIndex + delta;
+  const now = performance.now();
+  if (now - _lastLbStepAt < 40) return;   // swallow rapid duplicate events
+  _lastLbStepAt = now;
+  const prev = state.lbIndex;
+  let next = prev + delta;
   if (next < 0) next = state.visible.length - 1;
   if (next >= state.visible.length) next = 0;
+  if (next === prev) return;              // single-item folder; nothing to do
   state.lbIndex = next;
   renderLightbox();
 }
