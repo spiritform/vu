@@ -7,6 +7,8 @@ selects as a folder or zip.
 
 **[Download the latest release →](https://github.com/spiritform/vu/releases/latest)**
 
+![VU](screenshot.png)
+
 ## Features
 
 - Folder grid (images + videos) with lazy thumbnails cached in `.thumbs/`
