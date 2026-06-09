@@ -5,6 +5,8 @@ Windows Explorer / Finder window and VU pops open, pre-scanned to that folder.
 Click tiles to select, compare two side-by-side, heart favorites, export your
 selects as a folder or zip.
 
+**[Download the latest release →](https://github.com/spiritform/vu/releases/latest)**
+
 ## Features
 
 - Folder grid (images + videos) with lazy thumbnails cached in `.thumbs/`
