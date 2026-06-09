@@ -90,10 +90,10 @@ html, body {
   white-space: nowrap;
 }
 .btn:hover { background: #43434f; }
-.btn.primary { background: var(--primary); color: white; }
-.btn.primary:hover { filter: brightness(1.12); }
-.btn.accent { background: var(--accent); color: white; }
-.btn.accent:hover { filter: brightness(1.12); }
+.btn.primary { background: #fff; color: #111; }
+.btn.primary:hover { background: #e7e7ea; }
+.btn.accent { background: #fff; color: #111; }
+.btn.accent:hover { background: #e7e7ea; }
 .btn.ghost { background: transparent; color: var(--muted); }
 .btn.ghost:hover { background: var(--panel); color: var(--text); }
 
@@ -131,8 +131,8 @@ html, body {
   gap: 8px;
   padding: 10px 10px 10px 16px;
   border-radius: var(--radius);
-  background: var(--primary);
-  color: white;
+  background: var(--panel-3);
+  color: var(--text);
   font-size: 13px;
 }
 .sel-x {
@@ -186,7 +186,7 @@ html, body {
 }
 
 .tile.selected {
-  box-shadow: 0 0 0 2px var(--primary);
+  box-shadow: 0 0 0 2px #fff;
 }
 
 .tile img, .tile video {

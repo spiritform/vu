@@ -67,6 +67,26 @@ app = FastAPI()
 # Session state — single folder at a time (local tool, single user)
 state = {"root": None, "hidden": set()}
 
+# Set by the main block once the Qt window exists; lets /api/show forward
+# "bring me forward" pings from a second-instance launch to the live window.
+_on_show_request = None
+
+
+def _runtime_file() -> Path:
+    return _app_data_dir() / "runtime.json"
+
+
+@app.get("/api/ping")
+def ping():
+    return {"ok": True, "pid": os.getpid()}
+
+
+@app.post("/api/show")
+def show_existing():
+    if _on_show_request:
+        _on_show_request()
+    return {"ok": True}
+
 
 def _hearts_path(root: Path) -> Path:
     d = _app_data_dir() / "hearts"
@@ -184,6 +204,7 @@ def scan(body: ScanBody):
     hidden = state["hidden"]
 
     items = []
+    seen_rels: set[str] = set()
     for p in iterator:
         if not p.is_file():
             continue
@@ -193,6 +214,11 @@ def scan(body: ScanBody):
         rel = p.relative_to(root).as_posix()
         if rel in hidden:
             continue
+        if rel in seen_rels:
+            # Defensive: junctions/symlinks under recursive scan can reach the
+            # same file via different paths and produce visible duplicates.
+            continue
+        seen_rels.add(rel)
         stat = p.stat()
         items.append({
             "path": rel,
@@ -358,8 +384,9 @@ IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
 
-def _get_explorer_folder():
-    """Return the folder path of the foreground file-manager window, or None."""
+def _get_explorer_context():
+    """Return (folder_path, (x, y, w, h)) for the foreground file-manager
+    window, or (None, None). The rect lets us reposition VU over it."""
     if IS_WIN:
         try:
             import pythoncom
@@ -369,17 +396,23 @@ def _get_explorer_folder():
             pythoncom.CoInitialize()
             hwnd = win32gui.GetForegroundWindow()
             if not hwnd:
-                return None
+                return None, None
             shell = win32com.client.Dispatch("Shell.Application")
             for w in shell.Windows():
                 try:
                     if int(w.HWND) == hwnd:
-                        return w.Document.Folder.Self.Path
+                        path = w.Document.Folder.Self.Path
+                        try:
+                            l, t, r, b = win32gui.GetWindowRect(hwnd)
+                            rect = (l, t, max(1, r - l), max(1, b - t))
+                        except Exception:
+                            rect = None
+                        return path, rect
                 except Exception:
                     continue
         except Exception:
-            return None
-        return None
+            return None, None
+        return None, None
 
     if IS_MAC:
         try:
@@ -395,11 +428,11 @@ def _get_explorer_folder():
                 capture_output=True, text=True, timeout=2,
             )
             path = result.stdout.strip()
-            return path or None
+            return (path or None), None
         except Exception:
-            return None
+            return None, None
 
-    return None
+    return None, None
 
 
 _FONT_CANDIDATES = [
@@ -438,6 +471,7 @@ if __name__ == "__main__":
     import socket
     import threading
     import time
+    import urllib.request
     import uvicorn
     import pystray
     import keyboard
@@ -447,6 +481,44 @@ if __name__ == "__main__":
     from PySide6.QtWebEngineCore import QWebEnginePage
     from PySide6.QtCore import QUrl, Qt, QEvent, Signal, QTimer
     from PySide6.QtGui import QIcon
+
+    # Fixed local port held for the lifetime of the process — used as an atomic
+    # singleton lock. The actual server runs on a separate port.
+    LOCK_PORT = 50447
+
+    def _acquire_lock():
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", LOCK_PORT))
+            s.listen(1)
+            return s
+        except OSError:
+            s.close()
+            return None
+
+    def _forward_then_exit():
+        """Another instance owns the lock — ping it (with retries, in case it's
+        still booting), tell it to show its window, then exit."""
+        rf = _runtime_file()
+        deadline = time.time() + 4
+        while time.time() < deadline:
+            try:
+                data = json.loads(rf.read_text(encoding="utf-8"))
+                port = int(data.get("port") or 0)
+                if port:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/api/show",
+                        data=b"", timeout=0.6,
+                    ).read()
+                    break
+            except Exception:
+                pass
+            time.sleep(0.25)
+        sys.exit(0)
+
+    _lock_socket = _acquire_lock()
+    if _lock_socket is None:
+        _forward_then_exit()
 
     def pick_port(preferred: int = 8003) -> int:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -563,8 +635,9 @@ if __name__ == "__main__":
             menu.exec(event.globalPos())
 
     class MainWindow(QMainWindow):
-        # cross-thread "open me with this folder" signal — empty string means just show
-        show_with_folder = Signal(str)
+        # cross-thread "open me with this folder" signal — empty string means just show.
+        # rect (object) is (x, y, w, h) of the Explorer window to align over, or None.
+        show_with_folder = Signal(str, object)
 
         def __init__(self):
             super().__init__()
@@ -602,11 +675,32 @@ if __name__ == "__main__":
             e.ignore()
             self.hide()
 
-        def _handle_show(self, folder: str):
+        def _handle_show(self, folder: str, rect):
+            if rect:
+                x, y, w, h = rect
+                self.setGeometry(int(x), int(y), int(w), int(h))
             self.show()
             self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
             self.activateWindow()
             self.raise_()
+            if IS_WIN:
+                # Qt's activateWindow can't steal foreground from Explorer
+                # reliably — the topmost flip is the standard Win32 workaround
+                try:
+                    import win32gui, win32con
+                    hwnd = int(self.winId())
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    win32gui.SetWindowPos(
+                        hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+                    )
+                    win32gui.SetWindowPos(
+                        hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+                    )
+                    win32gui.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
             if folder:
                 self.view.page().runJavaScript(
                     f"window.openFolder({json.dumps(folder)})"
@@ -615,7 +709,7 @@ if __name__ == "__main__":
         def _on_dropped(self, paths: list):
             # Make sure window is visible when something gets dropped
             if not self.isVisible():
-                self._handle_show("")
+                self._handle_show("", None)
             self.view.page().runJavaScript(
                 f"window.openDropped({json.dumps(paths)})"
             )
@@ -627,16 +721,33 @@ if __name__ == "__main__":
 
     window = MainWindow()  # starts hidden — user invokes via hotkey or tray
 
+    # Let /api/show forward "second-instance launched" pings to the live window
+    def _request_show():
+        window.show_with_folder.emit("", None)
+    globals()["_on_show_request"] = _request_show
+
+    # Publish our port so a future launch can find us
+    try:
+        _runtime_file().write_text(
+            json.dumps({"port": PORT, "pid": os.getpid()}), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
     def on_hotkey():
-        folder = _get_explorer_folder() or ""
-        window.show_with_folder.emit(folder)
+        folder, rect = _get_explorer_context()
+        window.show_with_folder.emit(folder or "", rect)
 
     def tray_open(icon, item):
-        window.show_with_folder.emit("")
+        window.show_with_folder.emit("", None)
 
     def tray_quit(icon, item):
         try:
             tray.stop()
+        except Exception:
+            pass
+        try:
+            _runtime_file().unlink(missing_ok=True)
         except Exception:
             pass
         qt_app.quit()

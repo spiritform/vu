@@ -436,7 +436,14 @@ function swapCompare() {
 function openLightbox(index) {
   state.lbIndex = index;
   renderLightbox();
-  $('lightbox').classList.remove('hidden');
+  const lb = $('lightbox');
+  lb.classList.remove('hidden');
+  // Move keyboard focus off whatever was clicked (scan btn, tile, etc.) so the
+  // very first arrow key press routes through the document-level handler.
+  if (document.activeElement && document.activeElement !== document.body) {
+    document.activeElement.blur();
+  }
+  lb.focus();
 }
 
 function closeLightbox() {
@@ -448,6 +455,31 @@ function closeLightbox() {
   stage.innerHTML = '';
 }
 
+const _lbPrefetch = new Map();  // path -> Image (keeps cache alive)
+
+function preloadLightboxNeighbors() {
+  const n = state.visible.length;
+  if (n < 2) return;
+  const want = new Set();
+  for (const d of [-1, 1, -2, 2]) {
+    let idx = state.lbIndex + d;
+    if (idx < 0) idx += n;
+    if (idx >= n) idx -= n;
+    const it = state.visible[idx];
+    if (!it || it.kind !== 'image') continue;  // skip videos
+    want.add(it.path);
+    if (!_lbPrefetch.has(it.path)) {
+      const img = new Image();
+      img.src = fileUrl(it.path);
+      _lbPrefetch.set(it.path, img);
+    }
+  }
+  // drop stale prefetches so the map doesn't grow forever
+  for (const path of _lbPrefetch.keys()) {
+    if (!want.has(path)) _lbPrefetch.delete(path);
+  }
+}
+
 function renderLightbox() {
   const item = state.visible[state.lbIndex];
   if (!item) return closeLightbox();
@@ -457,25 +489,32 @@ function renderLightbox() {
   $('lbHeart').classList.toggle('on', item.hearted);
 
   const stage = $('lbStage');
-  stage.innerHTML = '';
-  let el;
-  if (item.kind === 'video') {
-    el = document.createElement('video');
-    el.src = fileUrl(item.path);
-    el.controls = true;
-    el.autoplay = true;
-  } else {
-    el = document.createElement('img');
-    el.src = fileUrl(item.path);
+  const wantTag = item.kind === 'video' ? 'VIDEO' : 'IMG';
+  let el = stage.firstElementChild;
+  // Reuse the existing element when the type matches — browsers hold the
+  // previous frame until the new src paints, which kills the blank flicker
+  // between near-identical neighbors (e.g. Midjourney variants).
+  if (!el || el.tagName !== wantTag) {
+    stage.querySelectorAll('video').forEach(v => v.pause());
+    stage.innerHTML = '';
+    el = document.createElement(item.kind === 'video' ? 'video' : 'img');
+    if (item.kind === 'video') {
+      el.controls = true;
+      el.autoplay = true;
+    }
+    stage.appendChild(el);
   }
-  stage.appendChild(el);
+  const newSrc = fileUrl(item.path);
+  if (el.getAttribute('src') !== newSrc) el.src = newSrc;
+
+  preloadLightboxNeighbors();
 }
 
 let _lastLbStepAt = 0;
 function lbStep(delta) {
   if (state.lbIndex < 0) return;
   const now = performance.now();
-  if (now - _lastLbStepAt < 40) return;   // swallow rapid duplicate events
+  if (now - _lastLbStepAt < 120) return;   // also guards against key autorepeat
   _lastLbStepAt = now;
   const prev = state.lbIndex;
   let next = prev + delta;
@@ -561,8 +600,16 @@ document.addEventListener('keydown', (e) => {
   // Global when lightbox open
   if (!$('lightbox').classList.contains('hidden')) {
     if (e.key === 'Escape') { e.preventDefault(); closeLightbox(); return; }
-    if (e.key === 'ArrowLeft') { e.preventDefault(); lbStep(-1); return; }
-    if (e.key === 'ArrowRight') { e.preventDefault(); lbStep(1); return; }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (!e.repeat) lbStep(-1);
+      return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (!e.repeat) lbStep(1);
+      return;
+    }
     if (e.key === 'h' || e.key === 'H') {
       e.preventDefault();
       const item = state.visible[state.lbIndex];
