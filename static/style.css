@@ -161,6 +161,7 @@ html, body {
   border-radius: var(--radius);
   overflow: hidden;
   cursor: pointer;
+  user-select: none;
 }
 .tile::before {
   content: '';
