@@ -640,6 +640,12 @@ if __name__ == "__main__":
         except Exception:
             pass
         qt_app.quit()
+        if sys.platform == "win32":
+            # Kill the whole process tree so QtWebEngine helpers / uvicorn don't linger
+            subprocess.Popen(
+                ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                **_SUBPROCESS_KWARGS,
+            )
         os._exit(0)
 
     tray = pystray.Icon(
