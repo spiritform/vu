@@ -21,7 +21,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -312,6 +312,26 @@ _CT_TO_EXT = {
     "video/mp4": ".mp4", "video/webm": ".webm",
     "video/quicktime": ".mov", "video/x-matroska": ".mkv",
 }
+
+
+@app.post("/api/import_blob")
+async def import_blob(request: Request):
+    """Save a raw clipboard image (paste from browser, etc.) into the open folder."""
+    root = state["root"]
+    if not root:
+        raise HTTPException(400, "Scan a folder first")
+    ct = (request.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    ext = _CT_TO_EXT.get(ct)
+    if not ext:
+        raise HTTPException(400, f"Unsupported media type: {ct or 'unknown'}")
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "Empty paste body")
+    import time
+    name = f"paste_{int(time.time())}{ext}"
+    target = _unique_target(Path(root), name)
+    target.write_bytes(data)
+    return {"ok": True, "filename": target.name, "folder": str(root)}
 
 
 class ImportUrlBody(BaseModel):

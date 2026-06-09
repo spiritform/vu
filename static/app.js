@@ -849,6 +849,70 @@ document.addEventListener('drop', async (e) => {
   }
 });
 
+// ---------- Paste (Ctrl+V) from clipboard ----------
+// Handles both raw image bytes ("Copy Image" in a browser) and pasted URLs.
+document.addEventListener('paste', async (e) => {
+  const dt = e.clipboardData;
+  if (!dt) return;
+
+  // Prefer the raw image blob if the clipboard has one — works for
+  // "Copy Image" from sites that block drag-and-drop (e.g. midjourney).
+  const imgItem = Array.from(dt.items || [])
+    .find(it => it.type && it.type.startsWith('image/'));
+  if (imgItem) {
+    e.preventDefault();
+    if (!state.scannedRoot) {
+      toast('scan a folder first', 'error');
+      return;
+    }
+    const blob = imgItem.getAsFile();
+    if (!blob) return;
+    try {
+      toast('saving…');
+      const r = await fetch('/api/import_blob', {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+        body: blob,
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const res = await r.json();
+      await refreshScan();
+      toast(`imported ${res.filename}`);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+    return;
+  }
+
+  // No image bytes — if the user's typing into an input, leave it alone.
+  const inInput = /^(input|textarea)$/i.test(document.activeElement?.tagName || '');
+  if (inInput) return;
+
+  // Fall back to URL-like text on the clipboard (same path as a browser drop).
+  const text = (dt.getData('text/plain') || '').trim();
+  const html = dt.getData('text/html') || '';
+  let url = '';
+  if (/^https?:\/\/\S+$/i.test(text)) url = text;
+  if (!url) {
+    const m = html.match(/<(?:img|video|source)[^>]+src=["']([^"']+)["']/i);
+    if (m && /^https?:\/\//i.test(m[1])) url = m[1];
+  }
+  if (!url) return;
+  e.preventDefault();
+  if (!state.scannedRoot) {
+    toast('scan a folder first', 'error');
+    return;
+  }
+  try {
+    toast('downloading…');
+    const res = await api('POST', '/api/import_url', { url });
+    await refreshScan();
+    toast(`imported ${res.filename}`);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+});
+
 // Restore last folder (or use ?folder= URL param if present)
 const params = new URLSearchParams(window.location.search);
 const urlFolder = params.get('folder');
