@@ -190,11 +190,11 @@ function render() {
 
     const del = document.createElement('button');
     del.className = 'tile-btn delete';
-    del.title = 'remove from viewer';
+    del.title = 'delete';
     del.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"/><path d="M18 6l-12 12"/></svg>';
     del.addEventListener('click', (e) => {
       e.stopPropagation();
-      hideItem(item);
+      deleteItem(item);
     });
     actions.appendChild(del);
 
@@ -342,11 +342,11 @@ function renderPane(paneEl, item) {
 
   const del = document.createElement('button');
   del.className = 'cmp-btn cmp-del';
-  del.title = 'remove from viewer';
+  del.title = 'delete';
   del.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"/><path d="M18 6l-12 12"/></svg>';
   del.addEventListener('click', (e) => {
     e.stopPropagation();
-    hideItem(item);
+    deleteItem(item);
   });
   cmpActions.appendChild(del);
 
@@ -471,6 +471,9 @@ function preloadLightboxNeighbors() {
     if (!_lbPrefetch.has(it.path)) {
       const img = new Image();
       img.src = fileUrl(it.path);
+      // warm the decode cache too — without this the actual lightbox swap can
+      // show progressive-decode tiles ("square pattern") on the first paint
+      img.decode?.().catch(() => {});
       _lbPrefetch.set(it.path, img);
     }
   }
@@ -478,6 +481,18 @@ function preloadLightboxNeighbors() {
   for (const path of _lbPrefetch.keys()) {
     if (!want.has(path)) _lbPrefetch.delete(path);
   }
+}
+
+// Token + decode pattern: guarantees the new image is fully decoded before we
+// swap it onto the visible <img>, so the user never sees partial tiles.
+let _lbImgReq = 0;
+async function setLightboxImageSrc(el, src) {
+  const my = ++_lbImgReq;
+  const probe = new Image();
+  probe.src = src;
+  try { await probe.decode(); } catch (_) {}
+  if (my !== _lbImgReq) return;  // a newer step started; abandon this paint
+  if (el.getAttribute('src') !== src) el.src = src;
 }
 
 function renderLightbox() {
@@ -505,7 +520,11 @@ function renderLightbox() {
     stage.appendChild(el);
   }
   const newSrc = fileUrl(item.path);
-  if (el.getAttribute('src') !== newSrc) el.src = newSrc;
+  if (item.kind === 'video') {
+    if (el.getAttribute('src') !== newSrc) el.src = newSrc;
+  } else {
+    setLightboxImageSrc(el, newSrc);
+  }
 
   preloadLightboxNeighbors();
 }
@@ -525,14 +544,14 @@ function lbStep(delta) {
   renderLightbox();
 }
 
-async function hideItem(item) {
+async function deleteItem(item) {
   if (!item) return;
   try {
-    await api('POST', '/api/hide', { path: item.path });
+    const res = await api('POST', '/api/delete', { path: item.path });
     state.items = state.items.filter(x => x !== item);
     state.visible = state.visible.filter(x => x !== item);
     state.selection.delete(item);
-    // close compare if the hidden item was one of the two being compared
+    // close compare if the deleted item was one of the two being compared
     if (state.compareA_view === item || state.compareB === item) {
       closeCompare();
     }
@@ -546,14 +565,14 @@ async function hideItem(item) {
       }
     }
     render();
-    toast('hidden from viewer');
+    toast(res.trashed ? 'moved to trash' : 'deleted');
   } catch (e) {
     toast(e.message, 'error');
   }
 }
 
 async function lbDelete() {
-  hideItem(state.visible[state.lbIndex]);
+  deleteItem(state.visible[state.lbIndex]);
 }
 
 // ---------- Export ----------
@@ -639,9 +658,9 @@ document.addEventListener('keydown', (e) => {
   }
   if ((e.key === 'Delete' || e.key === 'Backspace') && state.selection.size) {
     e.preventDefault();
-    // copy before iterating, since hideItem mutates state.selection
-    const toHide = [...state.selection];
-    toHide.forEach(item => hideItem(item));
+    // copy before iterating, since deleteItem mutates state.selection
+    const toDelete = [...state.selection];
+    toDelete.forEach(item => deleteItem(item));
     return;
   }
   if (e.key === 'h' || e.key === 'H') {
@@ -699,6 +718,20 @@ document.addEventListener('mousedown', (e) => {
   if (e.shiftKey && e.target.closest('.tile')) e.preventDefault();
 });
 
+// Click off a tile (or onto unrelated chrome) clears selection.
+// Skip when a modal is open, when the click is on a tile, or on a control
+// that needs the live selection to do its job.
+document.addEventListener('mousedown', (e) => {
+  if (!state.selection.size) return;
+  if (e.button !== 0) return;
+  if (!$('lightbox').classList.contains('hidden')) return;
+  if (!$('exportModal').classList.contains('hidden')) return;
+  if (!$('compare').classList.contains('hidden')) return;
+  if (e.target.closest('.tile')) return;
+  if (e.target.closest('#exportBtn, #compareBtn, #clearSelBtn, #selChip')) return;
+  clearSelection();
+});
+
 // Ctrl+scroll to resize tiles
 const TILE_MIN = 100;
 const TILE_MAX = 480;
@@ -733,15 +766,88 @@ window.openDropped = async function(paths) {
     const res = await api('POST', '/api/drop', { paths });
     if (!res.folder) return;
     const droppedRoot = res.folder.replace(/\\/g, '/').toLowerCase();
-    // If they're dropping files we already have loaded (e.g. drag-out of full-screen
-    // view dropped back on VU itself), don't blow away the current state.
-    if (state.scannedRoot && state.scannedRoot === droppedRoot) return;
-    $('folder').value = res.folder;
-    await scan();
+
+    // Folder drop → navigate to it (unchanged behavior)
+    if (res.is_dir) {
+      if (state.scannedRoot && state.scannedRoot === droppedRoot) return;
+      $('folder').value = res.folder;
+      await scan();
+      return;
+    }
+
+    // File drop with no folder open yet → navigate to the parent folder
+    // (preserves the "drag a file in to start browsing" entry point)
+    if (!state.scannedRoot) {
+      $('folder').value = res.folder;
+      await scan();
+      return;
+    }
+
+    // File drop with a folder already open → import into the current folder
+    // Same-folder drops (e.g. drag-out of lightbox back onto VU) become no-ops
+    // since /api/import_paths skips files that already live in dest.
+    const imp = await api('POST', '/api/import_paths', { paths });
+    if (imp.copied > 0) {
+      await refreshScan();
+      toast(`added ${imp.copied}${imp.skipped ? ` (${imp.skipped} skipped)` : ''}`);
+    } else if (imp.skipped > 0) {
+      toast('nothing to import (already here or wrong type)');
+    }
   } catch (e) {
     toast(e.message, 'error');
   }
 };
+
+// ---------- External drag-and-drop (browser, etc.) ----------
+// Local-file drops are intercepted by Qt before they reach here. This handler
+// covers drags from a browser tab, which provide a URL on the dataTransfer
+// (text/uri-list, plain text, or an <img> in text/html).
+function _extractDropUrl(dt) {
+  if (!dt) return '';
+  const uriList = (dt.getData('text/uri-list') || '').trim();
+  if (uriList) {
+    for (const line of uriList.split(/\r?\n/)) {
+      const s = line.trim();
+      if (s && !s.startsWith('#') && /^https?:\/\//i.test(s)) return s;
+    }
+  }
+  const plain = (dt.getData('text/plain') || '').trim();
+  if (/^https?:\/\/\S+$/i.test(plain)) return plain;
+  const html = dt.getData('text/html') || '';
+  const m = html.match(/<(?:img|video|source)[^>]+src=["']([^"']+)["']/i);
+  if (m && /^https?:\/\//i.test(m[1])) return m[1];
+  return '';
+}
+
+document.addEventListener('dragover', (e) => {
+  if (!e.dataTransfer) return;
+  const types = Array.from(e.dataTransfer.types || []);
+  if (
+    types.includes('text/uri-list') ||
+    types.includes('text/html') ||
+    types.includes('text/plain')
+  ) {
+    e.preventDefault();  // required to enable the subsequent drop event
+  }
+});
+
+document.addEventListener('drop', async (e) => {
+  const url = _extractDropUrl(e.dataTransfer);
+  if (!url) return;
+  e.preventDefault();
+  if (!state.scannedRoot) {
+    toast('scan a folder first', 'error');
+    return;
+  }
+  try {
+    toast('downloading…');
+    const res = await api('POST', '/api/import_url', { url });
+    await refreshScan();
+    toast(`imported ${res.filename}`);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+});
 
 // Restore last folder (or use ?folder= URL param if present)
 const params = new URLSearchParams(window.location.search);

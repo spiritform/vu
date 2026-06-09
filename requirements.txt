@@ -5,4 +5,5 @@ Pillow
 PySide6
 pystray
 keyboard
+send2trash
 pywin32; sys_platform == "win32"

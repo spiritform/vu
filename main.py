@@ -1,11 +1,19 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path
+
+try:
+    from send2trash import send2trash as _send2trash
+except Exception:
+    _send2trash = None
 
 # PyInstaller --noconsole: stdout/stderr are None, which breaks any print/log call
 if sys.stdout is None:
@@ -65,7 +73,7 @@ def _ffmpeg_path() -> str:
 app = FastAPI()
 
 # Session state — single folder at a time (local tool, single user)
-state = {"root": None, "hidden": set()}
+state = {"root": None}
 
 # Set by the main block once the Qt window exists; lets /api/show forward
 # "bring me forward" pings from a second-instance launch to the live window.
@@ -199,9 +207,6 @@ def scan(body: ScanBody):
 
     iterator = root.rglob("*") if body.recursive else root.iterdir()
     hearts = load_hearts(root)
-    # fresh scan resets the session hidden list
-    state["hidden"] = set()
-    hidden = state["hidden"]
 
     items = []
     seen_rels: set[str] = set()
@@ -212,8 +217,6 @@ def scan(body: ScanBody):
         if ext not in MEDIA_EXTS:
             continue
         rel = p.relative_to(root).as_posix()
-        if rel in hidden:
-            continue
         if rel in seen_rels:
             # Defensive: junctions/symlinks under recursive scan can reach the
             # same file via different paths and produce visible duplicates.
@@ -230,7 +233,7 @@ def scan(body: ScanBody):
         })
 
     items.sort(key=lambda x: x["mtime"], reverse=True)
-    return {"root": str(root), "count": len(items), "items": items, "hidden_count": len(hidden)}
+    return {"root": str(root), "count": len(items), "items": items}
 
 
 class DropBody(BaseModel):
@@ -243,10 +246,126 @@ def drop(body: DropBody):
         raise HTTPException(400, "no paths")
     first = Path(body.paths[0])
     if first.is_dir():
-        return {"folder": str(first.resolve())}
+        return {"folder": str(first.resolve()), "is_dir": True}
     if first.exists():
-        return {"folder": str(first.parent.resolve())}
+        return {"folder": str(first.parent.resolve()), "is_dir": False}
     raise HTTPException(400, "path not found")
+
+
+def _unique_target(dest_dir: Path, name: str) -> Path:
+    # Sanitize: strip path separators, control chars, illegal Windows chars
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip().strip(".") or "import"
+    p = dest_dir / safe
+    if not p.exists():
+        return p
+    stem, suffix = Path(safe).stem, Path(safe).suffix
+    i = 1
+    while True:
+        cand = dest_dir / f"{stem}_{i}{suffix}"
+        if not cand.exists():
+            return cand
+        i += 1
+
+
+class ImportPathsBody(BaseModel):
+    paths: list[str]
+
+
+@app.post("/api/import_paths")
+def import_paths(body: ImportPathsBody):
+    root = state["root"]
+    if not root:
+        raise HTTPException(400, "Scan a folder first")
+    if not body.paths:
+        raise HTTPException(400, "no paths")
+    dest = Path(root)
+    copied = 0
+    skipped = 0
+    for src_str in body.paths:
+        src = Path(src_str)
+        if not src.exists() or not src.is_file():
+            skipped += 1
+            continue
+        if src.suffix.lower() not in MEDIA_EXTS:
+            skipped += 1
+            continue
+        try:
+            if src.resolve().parent == dest.resolve():
+                # already lives here — nothing to do
+                continue
+        except Exception:
+            pass
+        target = _unique_target(dest, src.name)
+        try:
+            shutil.copy2(str(src), str(target))
+            copied += 1
+        except Exception as e:
+            print(f"[import] copy fail {src}: {e}", file=sys.stderr)
+            skipped += 1
+    return {"ok": True, "copied": copied, "skipped": skipped, "folder": str(dest)}
+
+
+_CT_TO_EXT = {
+    "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/pjpeg": ".jpg",
+    "image/png": ".png", "image/gif": ".gif",
+    "image/webp": ".webp", "image/avif": ".avif", "image/bmp": ".bmp",
+    "video/mp4": ".mp4", "video/webm": ".webm",
+    "video/quicktime": ".mov", "video/x-matroska": ".mkv",
+}
+
+
+class ImportUrlBody(BaseModel):
+    url: str
+
+
+@app.post("/api/import_url")
+def import_url(body: ImportUrlBody):
+    root = state["root"]
+    if not root:
+        raise HTTPException(400, "Scan a folder first")
+    url = (body.url or "").strip()
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        raise HTTPException(400, "Only http(s) URLs are supported")
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; VU/1.0)",
+            "Accept": "image/*,video/*,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            ct = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            cd = resp.headers.get("Content-Disposition") or ""
+            data = resp.read()
+    except Exception as e:
+        raise HTTPException(400, f"Fetch failed: {e}")
+
+    # Derive a filename: prefer Content-Disposition, fall back to URL path
+    name = ""
+    m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd, re.IGNORECASE)
+    if m:
+        try:
+            name = urllib.parse.unquote(m.group(1))
+        except Exception:
+            name = m.group(1)
+    if not name:
+        name = Path(urllib.parse.urlparse(url).path).name
+    name = name or "import"
+
+    ext = Path(name).suffix.lower()
+    if ext not in MEDIA_EXTS:
+        guess = _CT_TO_EXT.get(ct)
+        if not guess:
+            raise HTTPException(400, f"Unsupported media type: {ct or 'unknown'}")
+        # If the filename ended in something irrelevant (e.g. ".aspx"), replace it
+        name = (Path(name).stem or "import") + guess
+
+    dest = Path(root)
+    target = _unique_target(dest, name)
+    target.write_bytes(data)
+    return {"ok": True, "filename": target.name, "folder": str(dest)}
 
 
 @app.get("/api/file")
@@ -293,19 +412,33 @@ def heart(body: HeartBody):
     return {"ok": True, "hearted": body.hearted, "total": len(hearts)}
 
 
-@app.post("/api/hide")
-def hide(body: PathBody):
+@app.post("/api/delete")
+def delete(body: PathBody):
     root = state["root"]
     if not root:
         raise HTTPException(400, "No folder scanned")
-    validate_path(body.path)
-    state["hidden"].add(body.path)
-    # also unheart since it's no longer shown
+    full = validate_path(body.path)
+
+    # If the file is gone already, still clear the heart and report ok
+    if full.exists():
+        trashed = False
+        if _send2trash is not None:
+            try:
+                _send2trash(str(full))
+                trashed = True
+            except Exception as e:
+                print(f"[delete] send2trash failed for {full}: {e}", file=sys.stderr)
+        if not trashed:
+            try:
+                full.unlink()
+            except Exception as e:
+                raise HTTPException(500, f"Delete failed: {e}")
+
     hearts = load_hearts(root)
     if body.path in hearts:
         hearts.discard(body.path)
         save_hearts(root, hearts)
-    return {"ok": True, "hidden_count": len(state["hidden"])}
+    return {"ok": True, "trashed": _send2trash is not None}
 
 
 @app.post("/api/export")
@@ -575,9 +708,12 @@ if __name__ == "__main__":
             if fp is not None:
                 fp.installEventFilter(self)
 
-        def _accept_if_files(self, e) -> bool:
+        def _has_local_files(self, e) -> bool:
             md = e.mimeData()
-            if md and md.hasUrls() and any(u.isLocalFile() for u in md.urls()):
+            return bool(md and md.hasUrls() and any(u.isLocalFile() for u in md.urls()))
+
+        def _accept_if_files(self, e) -> bool:
+            if self._has_local_files(e):
                 e.acceptProposedAction()
                 return True
             return False
@@ -595,7 +731,9 @@ if __name__ == "__main__":
                 if self._accept_if_files(e):
                     return True
             elif t == QEvent.Drop:
-                if e.mimeData().hasUrls():
+                # Only consume drops with local files. Browser drops (URLs only)
+                # fall through to the webview so the page can handle them in JS.
+                if self._has_local_files(e):
                     self._emit_drop(e)
                     return True
             return super().eventFilter(obj, e)
@@ -609,7 +747,7 @@ if __name__ == "__main__":
                 super().dragMoveEvent(e)
 
         def dropEvent(self, e):
-            if e.mimeData().hasUrls():
+            if self._has_local_files(e):
                 self._emit_drop(e)
             else:
                 super().dropEvent(e)
@@ -684,18 +822,16 @@ if __name__ == "__main__":
             self.activateWindow()
             self.raise_()
             if IS_WIN:
-                # Qt's activateWindow can't steal foreground from Explorer
-                # reliably — the topmost flip is the standard Win32 workaround
+                # Pin VU on top so drag-into from Explorer/browser works
+                # without VU disappearing behind the source window. Setting
+                # HWND_TOPMOST also gets us the foreground steal Qt can't
+                # reliably do on its own.
                 try:
                     import win32gui, win32con
                     hwnd = int(self.winId())
                     win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
                     win32gui.SetWindowPos(
                         hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
-                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
-                    )
-                    win32gui.SetWindowPos(
-                        hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
                         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
                     )
                     win32gui.SetForegroundWindow(hwnd)
