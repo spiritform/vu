@@ -1082,9 +1082,89 @@ if __name__ == "__main__":
         tray.activated.connect(_on_tray_activated)
         tray.show()
 
-    # Register the global Ctrl+Shift+V hotkey. Kept in a module-scope holder so
-    # the macOS Carbon callback/refs aren't garbage-collected.
+    # Holds the macOS Carbon callback + registration refs for the process
+    # lifetime — see _install_mac_global_hotkey for why they must not be GC'd.
     _hotkey_monitor = None
+
+    def _install_mac_global_hotkey(callback):
+        """Register Ctrl+Shift+V system-wide via the Carbon Event Manager.
+
+        Unlike an NSEvent global monitor this needs NO Accessibility / Input
+        Monitoring permission and fires regardless of which app is focused —
+        the OS delivers the key event straight to our installed handler, which
+        runs on Qt's main (Cocoa) run loop.
+
+        Returns the tuple of C objects the caller must keep alive for the
+        process lifetime (the callback + registration refs); if any of them is
+        garbage-collected the hotkey goes dead or crashes. Returns None on
+        failure.
+        """
+        try:
+            import ctypes
+            import ctypes.util
+
+            carbon_path = (
+                ctypes.util.find_library("Carbon")
+                or "/System/Library/Frameworks/Carbon.framework/Carbon"
+            )
+            carbon = ctypes.CDLL(carbon_path)
+
+            class EventTypeSpec(ctypes.Structure):
+                _fields_ = [("eventClass", ctypes.c_uint32),
+                            ("eventKind", ctypes.c_uint32)]
+
+            class EventHotKeyID(ctypes.Structure):
+                _fields_ = [("signature", ctypes.c_uint32),
+                            ("id", ctypes.c_uint32)]
+
+            # OSStatus handler(EventHandlerCallRef, EventRef, void *userData)
+            handler_proto = ctypes.CFUNCTYPE(
+                ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+            )
+
+            carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
+            carbon.InstallEventHandler.argtypes = [
+                ctypes.c_void_p, handler_proto, ctypes.c_uint32,
+                ctypes.POINTER(EventTypeSpec), ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            carbon.InstallEventHandler.restype = ctypes.c_int32
+            carbon.RegisterEventHotKey.argtypes = [
+                ctypes.c_uint32, ctypes.c_uint32, EventHotKeyID,
+                ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p),
+            ]
+            carbon.RegisterEventHotKey.restype = ctypes.c_int32
+
+            CONTROL_KEY = 0x1000               # controlKey
+            SHIFT_KEY = 0x0200                 # shiftKey
+            KEYCODE_V = 9                      # kVK_ANSI_V
+            EVENT_CLASS_KEYBOARD = 0x6b657962  # 'keyb'
+            EVENT_HOTKEY_PRESSED = 6           # kEventHotKeyPressed
+
+            def on_carbon_event(call_ref, event, user_data):
+                # Only our single hotkey is registered, so any press is ours.
+                # Run off the run loop so the Finder AppleScript can't stall UI.
+                threading.Thread(target=callback, daemon=True).start()
+                return 0  # noErr
+
+            handler_cb = handler_proto(on_carbon_event)
+            handler_ref = ctypes.c_void_p()
+            hotkey_ref = ctypes.c_void_p()
+            spec = EventTypeSpec(EVENT_CLASS_KEYBOARD, EVENT_HOTKEY_PRESSED)
+            hotkey_id = EventHotKeyID(0x56552020, 1)   # signature 'VU  '
+            target = carbon.GetApplicationEventTarget()
+
+            carbon.InstallEventHandler(
+                target, handler_cb, 1, ctypes.byref(spec), None,
+                ctypes.byref(handler_ref),
+            )
+            carbon.RegisterEventHotKey(
+                KEYCODE_V, CONTROL_KEY | SHIFT_KEY, hotkey_id,
+                target, 0, ctypes.byref(hotkey_ref),
+            )
+            return (carbon, handler_cb, handler_ref, hotkey_ref, spec, hotkey_id)
+        except Exception:
+            return None
 
     def _register_hotkey():
         global _hotkey_monitor
@@ -1093,84 +1173,8 @@ if __name__ == "__main__":
                 keyboard.add_hotkey("ctrl+shift+v", on_hotkey)
             except Exception:
                 pass
-            return
-        if IS_MAC:
-            # System-wide hotkey via the Carbon Event Manager (RegisterEventHotKey).
-            # Unlike an NSEvent global monitor, this needs NO Accessibility / Input
-            # Monitoring permission and fires regardless of which app is focused —
-            # the OS delivers the key event straight to our installed handler. The
-            # handler runs on Qt's main (Cocoa) run loop, so the actual work is
-            # punted to a thread to keep the AppleScript Finder query off the UI.
-            try:
-                import ctypes
-                import ctypes.util
-
-                carbon_path = (
-                    ctypes.util.find_library("Carbon")
-                    or "/System/Library/Frameworks/Carbon.framework/Carbon"
-                )
-                carbon = ctypes.CDLL(carbon_path)
-
-                class _EventTypeSpec(ctypes.Structure):
-                    _fields_ = [("eventClass", ctypes.c_uint32),
-                                ("eventKind", ctypes.c_uint32)]
-
-                class _EventHotKeyID(ctypes.Structure):
-                    _fields_ = [("signature", ctypes.c_uint32),
-                                ("id", ctypes.c_uint32)]
-
-                # OSStatus handler(EventHandlerCallRef, EventRef, void *userData)
-                _HANDLER_PROTO = ctypes.CFUNCTYPE(
-                    ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
-                )
-
-                carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
-                carbon.InstallEventHandler.argtypes = [
-                    ctypes.c_void_p, _HANDLER_PROTO, ctypes.c_uint32,
-                    ctypes.POINTER(_EventTypeSpec), ctypes.c_void_p,
-                    ctypes.POINTER(ctypes.c_void_p),
-                ]
-                carbon.InstallEventHandler.restype = ctypes.c_int32
-                carbon.RegisterEventHotKey.argtypes = [
-                    ctypes.c_uint32, ctypes.c_uint32, _EventHotKeyID,
-                    ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p),
-                ]
-                carbon.RegisterEventHotKey.restype = ctypes.c_int32
-
-                CONTROL_KEY = 0x1000               # controlKey
-                SHIFT_KEY = 0x0200                 # shiftKey
-                KEYCODE_V = 9                       # kVK_ANSI_V
-                EVENT_CLASS_KEYBOARD = 0x6b657962   # 'keyb'
-                EVENT_HOTKEY_PRESSED = 6            # kEventHotKeyPressed
-
-                def _carbon_handler(call_ref, event, user_data):
-                    # Only our single hotkey is registered, so any press is ours.
-                    # Run off the run loop so the Finder AppleScript can't stall UI.
-                    threading.Thread(target=on_hotkey, daemon=True).start()
-                    return 0  # noErr
-
-                _handler_cb = _HANDLER_PROTO(_carbon_handler)
-                _handler_ref = ctypes.c_void_p()
-                _hotkey_ref = ctypes.c_void_p()
-                _spec = _EventTypeSpec(EVENT_CLASS_KEYBOARD, EVENT_HOTKEY_PRESSED)
-                _hotkey_id = _EventHotKeyID(0x56552020, 1)   # signature 'VU  '
-                _target = carbon.GetApplicationEventTarget()
-
-                carbon.InstallEventHandler(
-                    _target, _handler_cb, 1, ctypes.byref(_spec), None,
-                    ctypes.byref(_handler_ref),
-                )
-                carbon.RegisterEventHotKey(
-                    KEYCODE_V, CONTROL_KEY | SHIFT_KEY, _hotkey_id,
-                    _target, 0, ctypes.byref(_hotkey_ref),
-                )
-
-                # Hold every ref so the C callback + registrations survive GC.
-                _hotkey_monitor = (
-                    carbon, _handler_cb, _handler_ref, _hotkey_ref, _spec, _hotkey_id
-                )
-            except Exception:
-                pass
+        elif IS_MAC:
+            _hotkey_monitor = _install_mac_global_hotkey(on_hotkey)
 
     _register_hotkey()
 
