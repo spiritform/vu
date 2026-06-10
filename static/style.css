@@ -162,6 +162,11 @@ html, body {
   overflow: hidden;
   cursor: pointer;
   user-select: none;
+  /* Let the engine skip layout/paint for off-screen tiles so huge folders stay
+     smooth. `auto` remembers each tile's real size once seen; the fallback keeps
+     the scrollbar honest before that. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--tile-size);
 }
 .tile::before {
   content: '';
@@ -414,6 +419,41 @@ html, body {
   gap: 6px;
   justify-content: flex-end;
 }
+.modal-text {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 18px;
+}
+.btn.danger-btn { background: var(--danger); color: #fff; }
+.btn.danger-btn:hover { background: #ff7373; }
+
+/* Lightbox "preparing video…" overlay shown while a first-play transcode runs */
+.lb-spinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(10, 10, 14, 0.72);
+  color: #fff;
+  padding: 14px 20px;
+  border-radius: var(--radius);
+  font-size: 14px;
+  z-index: 210;
+  pointer-events: none;
+}
+.lb-spinner-dot {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: lb-spin 0.8s linear infinite;
+}
+@keyframes lb-spin { to { transform: rotate(360deg); } }
 
 /* Toast */
 .toast {

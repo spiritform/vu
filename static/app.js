@@ -9,6 +9,9 @@ const state = {
   lastSelected: null,     // anchor for shift-range select
   compareB: null,         // second item when in compare view
   compareA_view: null,    // first item when in compare view
+  hidden: new Set(),      // paths "removed from VU" — hidden for this session only
+  _pendingDelete: null,   // items awaiting the delete-dialog choice
+  _lastScanSig: null,     // change-detection signature for auto-scan
 };
 
 // ---------- API ----------
@@ -37,17 +40,31 @@ function toast(msg, kind = '') {
 // ---------- Scan ----------
 // Non-destructive rescan — used by auto-scan to pull in newly-added files
 // without resetting selection, lightbox, or filter.
+// Cheap fingerprint of a scan result. If it matches the last one, nothing on
+// disk changed and we can skip the whole rebuild — this is what keeps auto-scan
+// from thrashing the DOM every couple seconds on a large, static folder.
+function scanSignature(items) {
+  let size = 0, mtime = 0;
+  for (const it of items) { size += it.size; mtime += it.mtime; }
+  return `${items.length}:${size}:${Math.round(mtime)}`;
+}
+
 async function refreshScan() {
   const folder = $('folder').value.trim();
   if (!folder) return;
   const recursive = $('recursive').checked;
   const res = await api('POST', '/api/scan', { folder, recursive });
 
+  const sig = scanSignature(res.items);
+  if (sig === state._lastScanSig) return;  // unchanged on disk — no work to do
+  state._lastScanSig = sig;
+
   const oldSelectedPaths = new Set([...state.selection].map(it => it.path));
   const oldLbPath = state.lbIndex >= 0 && state.visible[state.lbIndex]
     ? state.visible[state.lbIndex].path : null;
 
-  state.items = res.items;
+  // Keep session-hidden ("removed from VU") items out of the refreshed set.
+  state.items = res.items.filter(x => !state.hidden.has(x.path));
   state.scannedRoot = (res.root || '').replace(/\\/g, '/').toLowerCase();
 
   applyFilter();
@@ -75,11 +92,15 @@ function setAutoScan(on) {
   localStorage.setItem('autoScan', on ? '1' : '');
   if (!on) return;
   autoScanTimer = setInterval(async () => {
+    // Don't poll while closed to the tray / not visible — QtWebEngine reports
+    // the page as hidden, and there's no point rescanning an unseen window.
+    if (document.hidden) return;
     if (!state.scannedRoot) return;
     // skip while overlays are open to avoid interrupting the user
     if (!$('lightbox').classList.contains('hidden')) return;
     if (!$('compare').classList.contains('hidden')) return;
     if (!$('exportModal').classList.contains('hidden')) return;
+    if (!$('deleteModal').classList.contains('hidden')) return;
     try { await refreshScan(); } catch (_) {}
   }, 2500);
 }
@@ -94,6 +115,8 @@ async function scan() {
     if (!$('lightbox').classList.contains('hidden')) closeLightbox();
     if (!$('compare').classList.contains('hidden')) closeCompare();
     if (!$('exportModal').classList.contains('hidden')) closeExport();
+    state.hidden = new Set();   // fresh session — forget "removed from VU"
+    state._lastScanSig = scanSignature(res.items);
     state.items = res.items;
     state.visible = [];
     state.scannedRoot = (res.root || '').replace(/\\/g, '/').toLowerCase();
@@ -141,6 +164,11 @@ function fileUrl(path) {
 }
 function thumbUrl(path) {
   return `/api/thumb?path=${encodeURIComponent(path)}`;
+}
+// Playback goes through /api/video, which transcodes codecs the webview can't
+// decode (e.g. H.264) to WebM and caches the result. Images still use fileUrl.
+function videoUrl(path) {
+  return `/api/video?path=${encodeURIComponent(path)}`;
 }
 
 function render() {
@@ -194,7 +222,7 @@ function render() {
     del.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"/><path d="M18 6l-12 12"/></svg>';
     del.addEventListener('click', (e) => {
       e.stopPropagation();
-      deleteItem(item);
+      requestDelete(deleteTargets(item));
     });
     actions.appendChild(del);
 
@@ -326,7 +354,7 @@ function renderPane(paneEl, item) {
   let el;
   if (item.kind === 'video') {
     el = document.createElement('video');
-    el.src = fileUrl(item.path);
+    el.src = videoUrl(item.path);
     el.controls = true;
     el.muted = true;
     el.loop = true;
@@ -346,7 +374,7 @@ function renderPane(paneEl, item) {
   del.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12"/><path d="M18 6l-12 12"/></svg>';
   del.addEventListener('click', (e) => {
     e.stopPropagation();
-    deleteItem(item);
+    requestDelete([item]);
   });
   cmpActions.appendChild(del);
 
@@ -449,6 +477,7 @@ function openLightbox(index) {
 function closeLightbox() {
   state.lbIndex = -1;
   $('lightbox').classList.add('hidden');
+  hideVideoSpinner();
   const stage = $('lbStage');
   // pause any playing video
   stage.querySelectorAll('video').forEach(v => v.pause());
@@ -516,17 +545,49 @@ function renderLightbox() {
     if (item.kind === 'video') {
       el.controls = true;
       el.autoplay = true;
+      el.addEventListener('loadeddata', hideVideoSpinner);
+      el.addEventListener('playing', hideVideoSpinner);
+      el.addEventListener('error', () => {
+        hideVideoSpinner();
+        toast('could not play this video', 'error');
+      });
     }
     stage.appendChild(el);
   }
-  const newSrc = fileUrl(item.path);
   if (item.kind === 'video') {
-    if (el.getAttribute('src') !== newSrc) el.src = newSrc;
+    const vsrc = videoUrl(item.path);
+    if (el.getAttribute('src') !== vsrc) {
+      el.muted = false;
+      el.src = vsrc;
+      showVideoSpinner();  // first play may transcode on the server
+      playWithMutedFallback(el);
+    }
   } else {
-    setLightboxImageSrc(el, newSrc);
+    hideVideoSpinner();
+    setLightboxImageSrc(el, fileUrl(item.path));
   }
 
   preloadLightboxNeighbors();
+}
+
+// While a video's first play transcodes server-side, show a "preparing" hint.
+// Delayed so cached/instant loads don't flash it.
+let _videoSpinnerTimer = null;
+function showVideoSpinner() {
+  clearTimeout(_videoSpinnerTimer);
+  _videoSpinnerTimer = setTimeout(() => $('lbSpinner').classList.remove('hidden'), 350);
+}
+function hideVideoSpinner() {
+  clearTimeout(_videoSpinnerTimer);
+  $('lbSpinner').classList.add('hidden');
+}
+
+// Start playback, falling back to muted on refusal. A server-side transcode can
+// outlast the click's autoplay permission, so we play explicitly rather than
+// rely on the `autoplay` attribute, and muted playback is always permitted.
+function playWithMutedFallback(el) {
+  const p = el.play();
+  if (p && p.catch) p.catch(() => { el.muted = true; el.play().catch(() => {}); });
 }
 
 let _lastLbStepAt = 0;
@@ -544,35 +605,92 @@ function lbStep(delta) {
   renderLightbox();
 }
 
-async function deleteItem(item) {
-  if (!item) return;
-  try {
-    const res = await api('POST', '/api/delete', { path: item.path });
-    state.items = state.items.filter(x => x !== item);
-    state.visible = state.visible.filter(x => x !== item);
-    state.selection.delete(item);
-    // close compare if the deleted item was one of the two being compared
-    if (state.compareA_view === item || state.compareB === item) {
-      closeCompare();
+// Drop items from the in-memory view + any open overlays. Shared by both
+// "remove from VU" and "delete from disk" — neither touches more than this.
+function removeItemsFromView(items) {
+  const set = new Set(items);
+  state.items = state.items.filter(x => !set.has(x));
+  state.visible = state.visible.filter(x => !set.has(x));
+  for (const it of items) state.selection.delete(it);
+  if ((state.compareA_view && set.has(state.compareA_view)) ||
+      (state.compareB && set.has(state.compareB))) {
+    closeCompare();
+  }
+  updateCount();
+  if (state.lbIndex >= 0) {
+    if (!state.visible.length) {
+      closeLightbox();
+    } else {
+      if (state.lbIndex >= state.visible.length) state.lbIndex = state.visible.length - 1;
+      renderLightbox();
     }
-    updateCount();
-    if (state.lbIndex >= 0) {
-      if (!state.visible.length) {
-        closeLightbox();
-      } else {
-        if (state.lbIndex >= state.visible.length) state.lbIndex = 0;
-        renderLightbox();
-      }
+  }
+  render();
+}
+
+// Non-destructive: hide from this session's view, leave the file on disk.
+// Tracked in state.hidden so auto-scan / rescan won't bring it back.
+function removeFromVu(items) {
+  for (const it of items) state.hidden.add(it.path);
+  removeItemsFromView(items);
+  toast(items.length > 1 ? `removed ${items.length} from view` : 'removed from view');
+}
+
+// Destructive: move to the system Trash (or unlink if send2trash is missing).
+async function deleteFromDisk(items) {
+  let trashed = false, failed = 0;
+  for (const item of items) {
+    try {
+      const res = await api('POST', '/api/delete', { path: item.path });
+      trashed = res.trashed;
+    } catch (e) {
+      failed++;
     }
-    render();
-    toast(res.trashed ? 'moved to trash' : 'deleted');
-  } catch (e) {
-    toast(e.message, 'error');
+  }
+  removeItemsFromView(items);
+  if (failed) {
+    toast(`${failed} of ${items.length} failed to delete`, 'error');
+  } else {
+    toast(trashed
+      ? (items.length > 1 ? `moved ${items.length} to trash` : 'moved to trash')
+      : 'deleted');
   }
 }
 
-async function lbDelete() {
-  deleteItem(state.visible[state.lbIndex]);
+// Which items a per-tile delete should act on: if the clicked tile is part of a
+// multi-selection, act on the whole set (matches Finder/Explorer); otherwise
+// just the clicked item.
+function deleteTargets(item) {
+  if (item && state.selection.size > 1 && state.selection.has(item)) {
+    return [...state.selection];
+  }
+  return item ? [item] : [];
+}
+
+// Open the confirm dialog. Every delete path funnels through here so the user
+// always gets the remove-vs-delete choice instead of an irreversible action.
+function requestDelete(items) {
+  items = (items || []).filter(Boolean);
+  if (!items.length) return;
+  state._pendingDelete = items;
+  const n = items.length;
+  const it = n > 1 ? 'them' : 'it';
+  $('deleteTitle').textContent = n > 1 ? `Delete ${n} items?` : 'Delete this item?';
+  $('deleteBody').textContent =
+    `“Remove from VU” just hides ${it} from this view. ` +
+    `“Delete from disk” moves ${it} to the Trash.`;
+  $('deleteModal').classList.remove('hidden');
+  $('deleteRemove').focus();  // safe default
+}
+
+function closeDelete() {
+  $('deleteModal').classList.add('hidden');
+  state._pendingDelete = null;
+}
+
+function lbDelete() {
+  const item = state.visible[state.lbIndex];
+  if (item) requestDelete([item]);
 }
 
 // ---------- Export ----------
@@ -610,6 +728,12 @@ async function doExport(zip) {
 // ---------- Keyboard ----------
 document.addEventListener('keydown', (e) => {
   const inInput = /^(input|textarea)$/i.test(document.activeElement?.tagName || '');
+  // Delete-confirm dialog takes precedence; Esc cancels (no key triggers the
+  // destructive action — that needs a deliberate button click).
+  if (!$('deleteModal').classList.contains('hidden')) {
+    if (e.key === 'Escape') { e.preventDefault(); closeDelete(); }
+    return;
+  }
   // Compare view open
   if (!$('compare').classList.contains('hidden')) {
     if (e.key === 'Escape') { e.preventDefault(); closeCompare(); return; }
@@ -658,9 +782,7 @@ document.addEventListener('keydown', (e) => {
   }
   if ((e.key === 'Delete' || e.key === 'Backspace') && state.selection.size) {
     e.preventDefault();
-    // copy before iterating, since deleteItem mutates state.selection
-    const toDelete = [...state.selection];
-    toDelete.forEach(item => deleteItem(item));
+    requestDelete([...state.selection]);  // snapshot — the dialog acts on this set
     return;
   }
   if (e.key === 'h' || e.key === 'H') {
@@ -693,6 +815,18 @@ $('clearSelBtn').addEventListener('click', clearSelection);
 $('exportCancel').addEventListener('click', closeExport);
 $('exportGo').addEventListener('click', () => doExport(false));
 $('exportZip').addEventListener('click', () => doExport(true));
+$('deleteCancel').addEventListener('click', closeDelete);
+$('deleteRemove').addEventListener('click', () => {
+  const items = state._pendingDelete; closeDelete();
+  if (items) removeFromVu(items);
+});
+$('deleteDisk').addEventListener('click', () => {
+  const items = state._pendingDelete; closeDelete();
+  if (items) deleteFromDisk(items);
+});
+$('deleteModal').addEventListener('click', (e) => {
+  if (e.target.id === 'deleteModal') closeDelete();
+});
 $('lbClose').addEventListener('click', closeLightbox);
 $('lbPrev').addEventListener('click', () => lbStep(-1));
 $('lbNext').addEventListener('click', () => lbStep(1));
