@@ -1084,7 +1084,7 @@ if __name__ == "__main__":
 
     # Holds the macOS Carbon callback + registration refs for the process
     # lifetime — see _install_mac_global_hotkey for why they must not be GC'd.
-    _hotkey_monitor = None
+    _hotkey_refs = None
 
     def _install_mac_global_hotkey(callback):
         """Register Ctrl+Shift+V system-wide via the Carbon Event Manager.
@@ -1141,7 +1141,7 @@ if __name__ == "__main__":
             EVENT_CLASS_KEYBOARD = 0x6b657962  # 'keyb'
             EVENT_HOTKEY_PRESSED = 6           # kEventHotKeyPressed
 
-            def on_carbon_event(call_ref, event, user_data):
+            def on_carbon_event(_call_ref, _event, _user_data):
                 # Only our single hotkey is registered, so any press is ours.
                 # Run off the run loop so the Finder AppleScript can't stall UI.
                 threading.Thread(target=callback, daemon=True).start()
@@ -1163,18 +1163,19 @@ if __name__ == "__main__":
                 target, 0, ctypes.byref(hotkey_ref),
             )
             return (carbon, handler_cb, handler_ref, hotkey_ref, spec, hotkey_id)
-        except Exception:
+        except Exception as e:
+            print(f"VU: macOS hotkey registration failed: {e}", file=sys.stderr)
             return None
 
     def _register_hotkey():
-        global _hotkey_monitor
+        global _hotkey_refs
         if IS_WIN:
             try:
                 keyboard.add_hotkey("ctrl+shift+v", on_hotkey)
             except Exception:
                 pass
         elif IS_MAC:
-            _hotkey_monitor = _install_mac_global_hotkey(on_hotkey)
+            _hotkey_refs = _install_mac_global_hotkey(on_hotkey)
 
     _register_hotkey()
 
