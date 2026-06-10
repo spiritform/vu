@@ -439,6 +439,40 @@ html, body {
 .btn.danger-btn { background: var(--danger); color: #fff; }
 .btn.danger-btn:hover { background: #ff7373; }
 
+.btn.icon-only {
+  width: var(--control-h);
+  height: var(--control-h);
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.hotkey-field {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 10px 12px;
+  border: none;
+  border-radius: var(--radius);
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.hotkey-field:hover { background: var(--panel-3); }
+.hotkey-field.capturing {
+  background: var(--panel-3);
+  color: var(--muted);
+  outline: 1px dashed rgba(255,255,255,0.25);
+}
+.modal-hint {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin: 8px 0 16px;
+}
+
 /* Lightbox "preparing video…" overlay shown while a first-play transcode runs */
 .lb-spinner {
   position: absolute;

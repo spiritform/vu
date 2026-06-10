@@ -53,6 +53,33 @@ def _app_data_dir() -> Path:
 def _folder_id(root: Path) -> str:
     return hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:16]
 
+
+DEFAULT_HOTKEY = "ctrl+shift+v"
+
+
+def _settings_path() -> Path:
+    return _app_data_dir() / "settings.json"
+
+
+def _load_settings() -> dict:
+    try:
+        data = json.loads(_settings_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_settings(data: dict) -> None:
+    _settings_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _settings_with_defaults() -> dict:
+    s = _load_settings()
+    s.setdefault("hotkey", DEFAULT_HOTKEY)
+    return s
+
 # Hide subprocess console windows on Windows
 _SUBPROCESS_KWARGS = {}
 if os.name == "nt":
@@ -95,6 +122,35 @@ def show_existing():
     if _on_show_request:
         _on_show_request()
     return {"ok": True}
+
+
+# Set by the main block once the hotkey path knows how to re-register itself.
+_re_register_hotkey = None
+
+
+class SettingsBody(BaseModel):
+    hotkey: str
+
+
+@app.get("/api/settings")
+def get_settings():
+    return _settings_with_defaults()
+
+
+@app.post("/api/settings")
+def post_settings(body: SettingsBody):
+    hk = (body.hotkey or "").strip().lower()
+    if not hk:
+        raise HTTPException(400, "hotkey required")
+    # Try to bind it before persisting — a bad combo (unknown key name,
+    # already-held shortcut) shouldn't survive to the next launch and lock
+    # the user out of the global hotkey.
+    if _re_register_hotkey and not _re_register_hotkey(hk):
+        raise HTTPException(400, f"could not register hotkey '{hk}'")
+    s = _settings_with_defaults()
+    s["hotkey"] = hk
+    _save_settings(s)
+    return s
 
 
 def _hearts_path(root: Path) -> Path:
@@ -1085,6 +1141,8 @@ if __name__ == "__main__":
     # Holds the macOS Carbon callback + registration refs for the process
     # lifetime — see _install_mac_global_hotkey for why they must not be GC'd.
     _hotkey_refs = None
+    # Combo currently bound on Windows; tracked so /api/settings can swap it.
+    _current_hotkey = None
 
     def _install_mac_global_hotkey(callback):
         """Register Ctrl+Shift+V system-wide via the Carbon Event Manager.
@@ -1167,16 +1225,49 @@ if __name__ == "__main__":
             print(f"VU: macOS hotkey registration failed: {e}", file=sys.stderr)
             return None
 
-    def _register_hotkey():
-        global _hotkey_refs
+    def _register_hotkey(combo: str = "") -> bool:
+        """Bind the global hotkey. Empty combo → read from settings. Returns
+        True on success. Called at startup and by /api/settings to rebind
+        without restarting the app."""
+        global _hotkey_refs, _current_hotkey
+        if not combo:
+            combo = _settings_with_defaults().get("hotkey", DEFAULT_HOTKEY)
         if IS_WIN:
+            # Remove the old binding only after the new one registers cleanly,
+            # so a bad combo doesn't leave the user with no hotkey at all.
+            old = _current_hotkey
+            if old:
+                try:
+                    keyboard.remove_hotkey(old)
+                except Exception:
+                    pass
             try:
-                keyboard.add_hotkey("ctrl+shift+v", on_hotkey)
+                keyboard.add_hotkey(combo, on_hotkey)
+                _current_hotkey = combo
+                return True
             except Exception:
-                pass
-        elif IS_MAC:
+                if old:
+                    try:
+                        keyboard.add_hotkey(old, on_hotkey)
+                        _current_hotkey = old
+                    except Exception:
+                        _current_hotkey = None
+                else:
+                    _current_hotkey = None
+                return False
+        if IS_MAC:
+            # TODO(mac): the combo is ignored — Carbon registration is hardcoded
+            # to Ctrl+Shift+V. Parsing arbitrary combos into Carbon keycodes
+            # and modifier flags is the next step for runtime hotkey changes on
+            # macOS. Re-registration would also need to UnregisterEventHotKey
+            # the existing binding first.
+            if _hotkey_refs is not None:
+                return True
             _hotkey_refs = _install_mac_global_hotkey(on_hotkey)
+            return _hotkey_refs is not None
+        return False
 
     _register_hotkey()
+    globals()["_re_register_hotkey"] = _register_hotkey
 
     sys.exit(qt_app.exec())

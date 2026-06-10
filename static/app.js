@@ -101,6 +101,7 @@ function setAutoScan(on) {
     if (!$('compare').classList.contains('hidden')) return;
     if (!$('exportModal').classList.contains('hidden')) return;
     if (!$('deleteModal').classList.contains('hidden')) return;
+    if (!$('settingsModal').classList.contains('hidden')) return;
     try { await refreshScan(); } catch (_) {}
   }, 2500);
 }
@@ -115,6 +116,7 @@ async function scan() {
     if (!$('lightbox').classList.contains('hidden')) closeLightbox();
     if (!$('compare').classList.contains('hidden')) closeCompare();
     if (!$('exportModal').classList.contains('hidden')) closeExport();
+    if (!$('settingsModal').classList.contains('hidden')) closeSettings();
     state.hidden = new Set();   // fresh session — forget "removed from VU"
     state._lastScanSig = scanSignature(res.items);
     state.items = res.items;
@@ -728,6 +730,13 @@ async function doExport(zip) {
 // ---------- Keyboard ----------
 document.addEventListener('keydown', (e) => {
   const inInput = /^(input|textarea)$/i.test(document.activeElement?.tagName || '');
+  // Settings modal: hotkey-capture eats keys via a capture-phase listener
+  // (see _onSettingsKeydown). Otherwise Esc closes the modal.
+  if (!$('settingsModal').classList.contains('hidden')) {
+    if (_hotkeyCaptureActive) return;
+    if (e.key === 'Escape') { e.preventDefault(); closeSettings(); }
+    return;
+  }
   // Delete-confirm dialog takes precedence; Esc cancels (no key triggers the
   // destructive action — that needs a deliberate button click).
   if (!$('deleteModal').classList.contains('hidden')) {
@@ -850,6 +859,103 @@ $('compare').addEventListener('click', (e) => {
 // Prevent accidental text selection when shift-clicking tiles
 document.addEventListener('mousedown', (e) => {
   if (e.shiftKey && e.target.closest('.tile')) e.preventDefault();
+});
+
+// ---------- Settings ----------
+let _hotkeyCaptureActive = false;
+let _pendingHotkey = 'ctrl+shift+v';
+
+async function openSettings() {
+  let hk = 'ctrl+shift+v';
+  try {
+    const r = await fetch('/api/settings');
+    const s = await r.json();
+    if (s && s.hotkey) hk = s.hotkey;
+  } catch (_) {}
+  _pendingHotkey = hk;
+  $('hotkeyField').textContent = hk;
+  $('hotkeyField').classList.remove('capturing');
+  $('settingsModal').classList.remove('hidden');
+}
+
+function closeSettings() {
+  $('settingsModal').classList.add('hidden');
+  _stopHotkeyCapture();
+}
+
+function _startHotkeyCapture() {
+  _hotkeyCaptureActive = true;
+  $('hotkeyField').classList.add('capturing');
+  $('hotkeyField').textContent = 'press a key combo…';
+}
+
+function _stopHotkeyCapture() {
+  _hotkeyCaptureActive = false;
+  $('hotkeyField').classList.remove('capturing');
+}
+
+// keyboard.add_hotkey on the Windows side accepts strings like "ctrl+shift+v"
+// or "alt+f1". Mirror that format here.
+function _formatCombo(e) {
+  const parts = [];
+  if (e.ctrlKey) parts.push('ctrl');
+  if (e.altKey) parts.push('alt');
+  if (e.shiftKey) parts.push('shift');
+  if (e.metaKey) parts.push('windows');
+  let k = e.key;
+  if (k === ' ') k = 'space';
+  else if (/^Arrow/.test(k)) k = k.replace('Arrow', '').toLowerCase();
+  else k = k.toLowerCase();
+  parts.push(k);
+  return parts.join('+');
+}
+
+// Capture-phase listener so we beat the document-level shortcut handler and
+// every browser default (Ctrl+S, Ctrl+F, etc.) during hotkey assignment.
+document.addEventListener('keydown', (e) => {
+  if (!_hotkeyCaptureActive) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.key === 'Escape') {
+    $('hotkeyField').textContent = _pendingHotkey;
+    _stopHotkeyCapture();
+    return;
+  }
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;  // modifier-only
+  if (!(e.ctrlKey || e.altKey || e.shiftKey || e.metaKey)) {
+    toast('needs ctrl, shift, or alt', 'error');
+    return;
+  }
+  _pendingHotkey = _formatCombo(e);
+  $('hotkeyField').textContent = _pendingHotkey;
+  _stopHotkeyCapture();
+}, true);
+
+async function saveSettings() {
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hotkey: _pendingHotkey }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      toast(err.detail || 'could not save hotkey', 'error');
+      return;
+    }
+    toast(`hotkey set to ${_pendingHotkey}`);
+    closeSettings();
+  } catch (_) {
+    toast('could not reach server', 'error');
+  }
+}
+
+$('settingsBtn').addEventListener('click', openSettings);
+$('settingsCancel').addEventListener('click', closeSettings);
+$('settingsSave').addEventListener('click', saveSettings);
+$('hotkeyField').addEventListener('click', _startHotkeyCapture);
+$('settingsModal').addEventListener('click', (e) => {
+  if (e.target.id === 'settingsModal') closeSettings();
 });
 
 // Click off a tile (or onto unrelated chrome) clears selection.
