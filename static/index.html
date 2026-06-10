@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>VU</title>
-  <link rel="stylesheet" href="style.css?v=19" />
+  <link rel="stylesheet" href="style.css?v=21" />
 </head>
 <body>
   <header class="topbar">
@@ -74,6 +74,10 @@
     <button id="lbPrev" class="lb-nav lb-prev" title="prev (←)">‹</button>
     <button id="lbNext" class="lb-nav lb-next" title="next (→)">›</button>
     <div id="lbStage" class="lb-stage"></div>
+    <div id="lbSpinner" class="lb-spinner hidden">
+      <div class="lb-spinner-dot"></div>
+      <span>preparing video…</span>
+    </div>
   </div>
 
   <!-- Compare view -->
@@ -123,8 +127,21 @@
     </div>
   </div>
 
+  <!-- Delete confirm modal -->
+  <div id="deleteModal" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="deleteTitle">Delete this item?</h3>
+      <p id="deleteBody" class="modal-text"></p>
+      <div class="modal-actions">
+        <button id="deleteCancel" class="btn ghost">cancel</button>
+        <button id="deleteRemove" class="btn">remove from VU</button>
+        <button id="deleteDisk" class="btn danger-btn">delete from disk</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=34"></script>
+  <script src="app.js?v=37"></script>
 </body>
 </html>

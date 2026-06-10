@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import urllib.parse
 import urllib.request
 import zipfile
@@ -417,6 +418,95 @@ def get_thumb(path: str = Query(...)):
     return FileResponse(thumb, headers={"Cache-Control": "public, max-age=86400"})
 
 
+# QtWebEngine's (PyPI) Chromium ships without proprietary codecs, so it can't
+# decode H.264/HEVC in the <video> element — only VP8/VP9/AV1/Theora. We
+# transcode unsupported videos to VP9/WebM on demand and cache the result so
+# they play inside the normal HTML lightbox (with all its chrome) on replay.
+WEB_PLAYABLE_VCODECS = {"vp8", "vp9", "av1", "theora"}
+
+# VP9 transcode quality knobs, tuned for visual fidelity. Lower CRF = higher
+# quality/larger files; lower cpu-used = slower/better. See _transcode_to_webm.
+VIDEO_TRANSCODE_CRF = "23"
+VIDEO_TRANSCODE_CPU_USED = "4"
+
+_transcode_master_lock = threading.Lock()
+_transcode_locks: dict[str, threading.Lock] = {}
+
+
+def _video_cache_path(root: Path, rel: str, mtime: float, size: int) -> Path:
+    key = f"{rel}|{int(mtime)}|{size}|vp9"
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
+    d = _app_data_dir() / "video_cache" / _folder_id(root)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{h}.webm"
+
+
+def _probe_video_codec(src: Path) -> str:
+    """Return the source's video codec name (lowercase), or '' if unknown."""
+    try:
+        out = subprocess.run(
+            [_ffmpeg_path(), "-hide_banner", "-i", str(src)],
+            capture_output=True, text=True, timeout=15, **_SUBPROCESS_KWARGS,
+        ).stderr
+    except Exception:
+        return ""
+    m = re.search(r"Stream #\d+:\d+.*: Video: (\w+)", out)
+    return m.group(1).lower() if m else ""
+
+
+def _transcode_to_webm(src: Path, dst: Path) -> bool:
+    """Transcode to VP9/WebM, tuned for visual fidelity (CRF 23, full res)."""
+    tmp = dst.with_name(dst.stem + ".partial.webm")
+    cmd = [
+        _ffmpeg_path(), "-hide_banner", "-loglevel", "error",
+        "-i", str(src),
+        "-c:v", "libvpx-vp9", "-crf", VIDEO_TRANSCODE_CRF, "-b:v", "0",
+        "-deadline", "good", "-cpu-used", VIDEO_TRANSCODE_CPU_USED, "-row-mt", "1",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "libopus", "-b:a", "128k",
+        "-y", str(tmp),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=600, **_SUBPROCESS_KWARGS)
+        if tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(dst)   # atomic — never serve a half-written file
+            return True
+    except Exception as e:
+        print(f"[video] transcode failed {src.name}: {e}", file=sys.stderr)
+    try:
+        tmp.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return False
+
+
+@app.get("/api/video")
+def get_video(path: str = Query(...)):
+    full = validate_path(path)
+    if not full.exists():
+        raise HTTPException(404, "Not found")
+    root = state["root"]
+    stat = full.stat()
+    cache = _video_cache_path(root, path, stat.st_mtime, stat.st_size)
+
+    if cache.exists():
+        return FileResponse(cache, media_type="video/webm",
+                            headers={"Cache-Control": "private, max-age=86400"})
+
+    # Already a codec the webview can decode? Serve the original untouched.
+    if _probe_video_codec(full) in WEB_PLAYABLE_VCODECS:
+        return FileResponse(full)
+
+    # Serialize per cache key so two requests for the same clip don't both encode.
+    with _transcode_master_lock:
+        lock = _transcode_locks.setdefault(str(cache), threading.Lock())
+    with lock:
+        if not cache.exists() and not _transcode_to_webm(full, cache):
+            raise HTTPException(500, "Video transcode failed")
+    return FileResponse(cache, media_type="video/webm",
+                        headers={"Cache-Control": "private, max-age=86400"})
+
+
 @app.post("/api/heart")
 def heart(body: HeartBody):
     root = state["root"]
@@ -626,12 +716,22 @@ if __name__ == "__main__":
     import time
     import urllib.request
     import uvicorn
-    import pystray
-    import keyboard
+    if IS_WIN:
+        # pystray + `keyboard` drive the Windows tray and global hotkey. Both
+        # misbehave on macOS:
+        #   - keyboard._darwinkeyboard is broken on Apple Silicon: it declares
+        #     CFDataGetBytes with an incomplete argtypes then calls it with a
+        #     by-value CFRange + output buffer, so the arm64 call is
+        #     mis-marshalled and CFDataGetBytes scribbles over memory → SIGBUS.
+        #   - pystray's macOS backend runs its own NSApplication loop, which is
+        #     illegal off the main thread (Qt already owns it) → AppKit traps.
+        # On macOS we use QSystemTrayIcon + an NSEvent monitor instead (below).
+        import pystray
+        import keyboard
 
     from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog
     from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
     from PySide6.QtCore import QUrl, Qt, QEvent, Signal, QTimer
     from PySide6.QtGui import QIcon
 
@@ -806,6 +906,12 @@ if __name__ == "__main__":
             self._last_save_dir = None
 
             self.view = WebView(self)
+            # Local trusted content — let videos autoplay. QtWebEngine otherwise
+            # blocks programmatic play() without a live user gesture, and ours
+            # expires during a server-side transcode, leaving the video paused.
+            self.view.settings().setAttribute(
+                QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False
+            )
             self.view.load(QUrl(f"http://127.0.0.1:{PORT}"))
             self.setCentralWidget(self.view)
 
@@ -915,20 +1021,104 @@ if __name__ == "__main__":
             )
         os._exit(0)
 
-    tray = pystray.Icon(
-        "VU",
-        _make_tray_icon_image(),
-        "VU — Ctrl+Shift+V",
-        menu=pystray.Menu(
-            pystray.MenuItem("Open VU", tray_open, default=True),
-            pystray.MenuItem("Quit", tray_quit),
-        ),
-    )
-    threading.Thread(target=tray.run, daemon=True).start()
+    def _qt_tray_quit(*_):
+        try:
+            _runtime_file().unlink(missing_ok=True)
+        except Exception:
+            pass
+        qt_app.quit()
+        os._exit(0)
 
-    try:
-        keyboard.add_hotkey("ctrl+shift+v", on_hotkey)
-    except Exception:
-        pass
+    if IS_WIN:
+        tray = pystray.Icon(
+            "VU",
+            _make_tray_icon_image(),
+            "VU — Ctrl+Shift+V",
+            menu=pystray.Menu(
+                pystray.MenuItem("Open VU", tray_open, default=True),
+                pystray.MenuItem("Quit", tray_quit),
+            ),
+        )
+        threading.Thread(target=tray.run, daemon=True).start()
+    else:
+        # macOS/Linux: drive the tray through Qt's existing main-thread Cocoa
+        # event loop. pystray would spin up a second NSApplication run loop on a
+        # background thread, which AppKit forbids (-[NSApplication run] is
+        # main-thread only) and crashes with a SIGTRAP.
+        import io
+
+        from PySide6.QtWidgets import QSystemTrayIcon, QMenu
+        from PySide6.QtGui import QAction, QPixmap
+
+        _png = io.BytesIO()
+        _make_tray_icon_image().save(_png, format="PNG")
+        _tray_pixmap = QPixmap()
+        _tray_pixmap.loadFromData(_png.getvalue(), "PNG")
+        tray_qicon = QIcon(str(icon_path)) if icon_path.exists() else QIcon(_tray_pixmap)
+
+        tray = QSystemTrayIcon(tray_qicon)
+        tray.setToolTip("VU — Ctrl+Shift+V")
+
+        tray_menu = QMenu()
+        act_open = QAction("Open VU", tray_menu)
+        act_open.triggered.connect(lambda: window.show_with_folder.emit("", None))
+        act_quit = QAction("Quit", tray_menu)
+        act_quit.triggered.connect(_qt_tray_quit)
+        tray_menu.addAction(act_open)
+        tray_menu.addAction(act_quit)
+        tray.setContextMenu(tray_menu)
+
+        def _on_tray_activated(reason):
+            if reason == QSystemTrayIcon.ActivationReason.Trigger:
+                window.show_with_folder.emit("", None)
+
+        tray.activated.connect(_on_tray_activated)
+        tray.show()
+
+    # Register the global Ctrl+Shift+V hotkey. Kept in a module-scope holder so
+    # the macOS monitor isn't garbage-collected.
+    _hotkey_monitor = None
+
+    def _register_hotkey():
+        global _hotkey_monitor
+        if IS_WIN:
+            try:
+                keyboard.add_hotkey("ctrl+shift+v", on_hotkey)
+            except Exception:
+                pass
+            return
+        if IS_MAC:
+            # Native Cocoa global key monitor via pyobjc (bundled with pystray).
+            # Unlike the `keyboard` lib it fails gracefully without Accessibility
+            # permission instead of crashing. Requires the user to grant
+            # Accessibility / Input Monitoring (see README) for events to fire.
+            try:
+                from AppKit import NSEvent
+
+                NS_KEYDOWN_MASK = 1 << 10          # NSEventMaskKeyDown
+                MOD_SHIFT = 1 << 17                # NSEventModifierFlagShift
+                MOD_CONTROL = 1 << 18              # NSEventModifierFlagControl
+                KEYCODE_V = 9                      # kVK_ANSI_V
+
+                def _mac_handler(event):
+                    try:
+                        flags = int(event.modifierFlags())
+                        if (flags & MOD_CONTROL) and (flags & MOD_SHIFT) \
+                                and event.keyCode() == KEYCODE_V:
+                            # Run off the Cocoa run loop so the AppleScript
+                            # Finder query doesn't stall the UI thread.
+                            threading.Thread(target=on_hotkey, daemon=True).start()
+                    except Exception:
+                        pass
+
+                _hotkey_monitor = (
+                    NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                        NS_KEYDOWN_MASK, _mac_handler
+                    )
+                )
+            except Exception:
+                pass
+
+    _register_hotkey()
 
     sys.exit(qt_app.exec())

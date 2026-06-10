@@ -28,7 +28,7 @@ fi
 echo "[VU] building..."
 "$PY" -m PyInstaller \
   --noconfirm \
-  --onefile \
+  --onedir \
   --windowed \
   --name VU \
   "${ICON_ARG[@]}" \
@@ -51,8 +51,7 @@ echo "[VU] building..."
 
 echo ""
 echo "[VU] done. Output:"
-echo "  dist/VU.app   (preferred — double-click to launch)"
-echo "  dist/VU       (single-file binary, if only that was produced)"
+echo "  dist/VU.app   (onedir bundle — double-click to launch)"
 echo ""
 echo "Note: On first launch, macOS will ask you to grant Accessibility permission"
 echo "      so the global Ctrl+Shift+V hotkey can register. System Settings →"
