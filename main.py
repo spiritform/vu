@@ -1076,7 +1076,7 @@ if __name__ == "__main__":
         tray.show()
 
     # Register the global Ctrl+Shift+V hotkey. Kept in a module-scope holder so
-    # the macOS monitor isn't garbage-collected.
+    # the macOS Carbon callback/refs aren't garbage-collected.
     _hotkey_monitor = None
 
     def _register_hotkey():
@@ -1088,33 +1088,79 @@ if __name__ == "__main__":
                 pass
             return
         if IS_MAC:
-            # Native Cocoa global key monitor via pyobjc (bundled with pystray).
-            # Unlike the `keyboard` lib it fails gracefully without Accessibility
-            # permission instead of crashing. Requires the user to grant
-            # Accessibility / Input Monitoring (see README) for events to fire.
+            # System-wide hotkey via the Carbon Event Manager (RegisterEventHotKey).
+            # Unlike an NSEvent global monitor, this needs NO Accessibility / Input
+            # Monitoring permission and fires regardless of which app is focused —
+            # the OS delivers the key event straight to our installed handler. The
+            # handler runs on Qt's main (Cocoa) run loop, so the actual work is
+            # punted to a thread to keep the AppleScript Finder query off the UI.
             try:
-                from AppKit import NSEvent
+                import ctypes
+                import ctypes.util
 
-                NS_KEYDOWN_MASK = 1 << 10          # NSEventMaskKeyDown
-                MOD_SHIFT = 1 << 17                # NSEventModifierFlagShift
-                MOD_CONTROL = 1 << 18              # NSEventModifierFlagControl
-                KEYCODE_V = 9                      # kVK_ANSI_V
+                carbon_path = (
+                    ctypes.util.find_library("Carbon")
+                    or "/System/Library/Frameworks/Carbon.framework/Carbon"
+                )
+                carbon = ctypes.CDLL(carbon_path)
 
-                def _mac_handler(event):
-                    try:
-                        flags = int(event.modifierFlags())
-                        if (flags & MOD_CONTROL) and (flags & MOD_SHIFT) \
-                                and event.keyCode() == KEYCODE_V:
-                            # Run off the Cocoa run loop so the AppleScript
-                            # Finder query doesn't stall the UI thread.
-                            threading.Thread(target=on_hotkey, daemon=True).start()
-                    except Exception:
-                        pass
+                class _EventTypeSpec(ctypes.Structure):
+                    _fields_ = [("eventClass", ctypes.c_uint32),
+                                ("eventKind", ctypes.c_uint32)]
 
+                class _EventHotKeyID(ctypes.Structure):
+                    _fields_ = [("signature", ctypes.c_uint32),
+                                ("id", ctypes.c_uint32)]
+
+                # OSStatus handler(EventHandlerCallRef, EventRef, void *userData)
+                _HANDLER_PROTO = ctypes.CFUNCTYPE(
+                    ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+                )
+
+                carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
+                carbon.InstallEventHandler.argtypes = [
+                    ctypes.c_void_p, _HANDLER_PROTO, ctypes.c_uint32,
+                    ctypes.POINTER(_EventTypeSpec), ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_void_p),
+                ]
+                carbon.InstallEventHandler.restype = ctypes.c_int32
+                carbon.RegisterEventHotKey.argtypes = [
+                    ctypes.c_uint32, ctypes.c_uint32, _EventHotKeyID,
+                    ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p),
+                ]
+                carbon.RegisterEventHotKey.restype = ctypes.c_int32
+
+                CONTROL_KEY = 0x1000               # controlKey
+                SHIFT_KEY = 0x0200                 # shiftKey
+                KEYCODE_V = 9                       # kVK_ANSI_V
+                EVENT_CLASS_KEYBOARD = 0x6b657962   # 'keyb'
+                EVENT_HOTKEY_PRESSED = 6            # kEventHotKeyPressed
+
+                def _carbon_handler(call_ref, event, user_data):
+                    # Only our single hotkey is registered, so any press is ours.
+                    # Run off the run loop so the Finder AppleScript can't stall UI.
+                    threading.Thread(target=on_hotkey, daemon=True).start()
+                    return 0  # noErr
+
+                _handler_cb = _HANDLER_PROTO(_carbon_handler)
+                _handler_ref = ctypes.c_void_p()
+                _hotkey_ref = ctypes.c_void_p()
+                _spec = _EventTypeSpec(EVENT_CLASS_KEYBOARD, EVENT_HOTKEY_PRESSED)
+                _hotkey_id = _EventHotKeyID(0x56552020, 1)   # signature 'VU  '
+                _target = carbon.GetApplicationEventTarget()
+
+                carbon.InstallEventHandler(
+                    _target, _handler_cb, 1, ctypes.byref(_spec), None,
+                    ctypes.byref(_handler_ref),
+                )
+                carbon.RegisterEventHotKey(
+                    KEYCODE_V, CONTROL_KEY | SHIFT_KEY, _hotkey_id,
+                    _target, 0, ctypes.byref(_hotkey_ref),
+                )
+
+                # Hold every ref so the C callback + registrations survive GC.
                 _hotkey_monitor = (
-                    NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                        NS_KEYDOWN_MASK, _mac_handler
-                    )
+                    carbon, _handler_cb, _handler_ref, _hotkey_ref, _spec, _hotkey_id
                 )
             except Exception:
                 pass
