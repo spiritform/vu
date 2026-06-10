@@ -11,6 +11,7 @@
   --danger: #ff5a5a;
   --radius: 8px;
   --tile-size: 220px;
+  --control-h: 35px;   /* shared height for every header control */
 }
 
 * { box-sizing: border-box; border: 0; outline: 0; }
@@ -60,10 +61,11 @@ html, body {
 
 .folder-row input[type="text"] {
   flex: 1;
+  height: var(--control-h);
   background: var(--panel);
   color: var(--text);
   border-radius: var(--radius);
-  padding: 10px 14px;
+  padding: 0 14px;
   font-family: ui-monospace, "SF Mono", Consolas, monospace;
   font-size: 13px;
   transition: background 0.12s;
@@ -79,6 +81,9 @@ html, body {
 
 /* Buttons — pure block fills, no borders */
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: #33333d;
   color: var(--text);
   padding: 10px 16px;
@@ -96,6 +101,11 @@ html, body {
 .btn.accent:hover { background: #e7e7ea; }
 .btn.ghost { background: transparent; color: var(--muted); }
 .btn.ghost:hover { background: var(--panel); color: var(--text); }
+
+/* Every header button + chip is pinned to the path field's height. Scoped to
+   .topbar so the modal dialogs keep their own (taller) button sizing. */
+.topbar .btn { height: var(--control-h); padding: 0 16px; }
+.topbar .chip { height: var(--control-h); padding: 0 12px; }
 
 .chip {
   display: inline-flex;
@@ -129,7 +139,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 10px 10px 16px;
+  height: var(--control-h);
+  padding: 0 10px 0 16px;
   border-radius: var(--radius);
   background: var(--panel-3);
   color: var(--text);
