@@ -659,12 +659,19 @@ def _get_explorer_context():
 
     if IS_MAC:
         try:
+            # The Finder terms (`Finder window`, `target`) only resolve inside a
+            # `tell application "Finder"` block — without it the script fails to
+            # COMPILE (-2741), which the inner `try` can't catch (compile happens
+            # before it runs), so osascript exits empty and VU opens with no
+            # folder. Keep the tell wrapper.
             script = (
-                'try\n'
-                '    return POSIX path of (target of front Finder window as alias)\n'
-                'on error\n'
-                '    return ""\n'
-                'end try'
+                'tell application "Finder"\n'
+                '    try\n'
+                '        return POSIX path of (target of front Finder window as alias)\n'
+                '    on error\n'
+                '        return ""\n'
+                '    end try\n'
+                'end tell'
             )
             result = subprocess.run(
                 ["osascript", "-e", script],
