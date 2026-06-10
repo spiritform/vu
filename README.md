@@ -45,9 +45,9 @@ chmod +x build.sh
 Output: `dist/VU.app`. The build script downloads a static ffmpeg into the
 bundle automatically — you don't need to install it system-wide.
 
-On first launch, macOS will prompt for Accessibility permission so the global
-hotkey can register. Grant it via *System Settings → Privacy & Security →
-Accessibility*.
+The global `Ctrl+Shift+V` hotkey is registered through the Carbon Event Manager,
+so it works out of the box — no Accessibility or Input Monitoring permission
+needed.
 
 Cross-compilation is not supported — build Windows exes on Windows, Mac apps
 on Mac.
