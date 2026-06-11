@@ -962,7 +962,11 @@ if __name__ == "__main__":
 
         def __init__(self):
             super().__init__()
-            self.setWindowTitle("VU")
+            # Icon-only title bar. A truly empty title makes Qt fall back to
+            # the executable name (`pythonw` from source, `VU` from the bundled
+            # build), so use a non-breaking space — visually blank, but Qt
+            # treats it as a real title and skips the fallback.
+            self.setWindowTitle("\u00A0")
             if icon_path.exists():
                 self.setWindowIcon(QIcon(str(icon_path)))
             self.resize(1400, 900)
