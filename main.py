@@ -1100,7 +1100,7 @@ if __name__ == "__main__":
         tray = pystray.Icon(
             "VU",
             _make_tray_icon_image(),
-            "VU — Ctrl+Shift+V",
+            "VU",
             menu=pystray.Menu(
                 pystray.MenuItem("Open VU", tray_open, default=True),
                 pystray.MenuItem("Quit", tray_quit),
@@ -1124,7 +1124,7 @@ if __name__ == "__main__":
         tray_qicon = QIcon(str(icon_path)) if icon_path.exists() else QIcon(_tray_pixmap)
 
         tray = QSystemTrayIcon(tray_qicon)
-        tray.setToolTip("VU — Ctrl+Shift+V")
+        tray.setToolTip("VU")
 
         tray_menu = QMenu()
         act_open = QAction("Open VU", tray_menu)
