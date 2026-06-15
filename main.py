@@ -683,6 +683,80 @@ IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 
 
+def _display_name_to_path(display_name: str):
+    """Resolve a shell display name (e.g. 'Desktop\\GrappleHook' or
+    'C:\\Users\\foo\\Pictures') to a filesystem path via the shell namespace,
+    or return None for virtual folders that have no FS path."""
+    import ctypes
+    from ctypes import POINTER, byref, c_ulong, c_void_p, c_wchar_p, wintypes
+
+    shell32 = ctypes.windll.shell32
+    ole32 = ctypes.windll.ole32
+
+    SHParseDisplayName = shell32.SHParseDisplayName
+    SHParseDisplayName.argtypes = [c_wchar_p, c_void_p, POINTER(c_void_p),
+                                   c_ulong, POINTER(c_ulong)]
+    SHParseDisplayName.restype = ctypes.HRESULT
+    SHGetPathFromIDListW = shell32.SHGetPathFromIDListW
+    SHGetPathFromIDListW.argtypes = [c_void_p, c_wchar_p]
+    SHGetPathFromIDListW.restype = wintypes.BOOL
+    CoTaskMemFree = ole32.CoTaskMemFree
+    CoTaskMemFree.argtypes = [c_void_p]
+
+    pidl = c_void_p()
+    sfgao = c_ulong(0)
+    try:
+        SHParseDisplayName(display_name, None, byref(pidl), 0, byref(sfgao))
+    except OSError:
+        return None
+    if not pidl.value:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        return buf.value if SHGetPathFromIDListW(pidl, buf) else None
+    finally:
+        CoTaskMemFree(pidl)
+
+
+def _get_dialog_folder(hwnd):
+    """If hwnd is a Win32 Open/Save dialog (class '#32770'), walk its UIA
+    tree for the breadcrumb toolbar (Name starts with 'Address: ') and
+    resolve to a filesystem path. Returns None on miss or any failure."""
+    try:
+        import win32gui
+        if win32gui.GetClassName(hwnd) != "#32770":
+            return None
+        import uiautomation as auto
+        root = auto.ControlFromHandle(hwnd)
+        if not root:
+            return None
+
+        # Bounded BFS — the address toolbar sits ~5 levels deep, and any
+        # branch that throws (UIA hiccups) should not abort the whole walk.
+        queue = [(root, 0)]
+        while queue:
+            ctrl, depth = queue.pop(0)
+            if depth > 12:
+                continue
+            try:
+                if ctrl.ControlTypeName == "ToolBarControl":
+                    name = ctrl.Name or ""
+                    if name.startswith("Address: "):
+                        path = _display_name_to_path(name[len("Address: "):])
+                        if path:
+                            return path
+            except Exception:
+                pass
+            try:
+                for c in ctrl.GetChildren():
+                    queue.append((c, depth + 1))
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
 def _get_explorer_context():
     """Return (folder_path, (x, y, w, h)) for the foreground file-manager
     window, or (None, None). The rect lets us reposition VU over it."""
@@ -709,6 +783,12 @@ def _get_explorer_context():
                         return path, rect
                 except Exception:
                     continue
+            # Fallback: foreground may be an OS file-Open/Save dialog (e.g.
+            # Photoshop, Notepad). The shell namespace doesn't expose those,
+            # so we ask UIA for the dialog's breadcrumb path.
+            path = _get_dialog_folder(hwnd)
+            if path:
+                return path, None
         except Exception:
             return None, None
         return None, None

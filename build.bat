@@ -18,6 +18,7 @@ python -m PyInstaller ^
   --add-data "static;static" ^
   --add-data "assets;assets" ^
   --collect-all PySide6 ^
+  --collect-all uiautomation ^
   --collect-submodules pystray ^
   --hidden-import pystray._win32 ^
   --hidden-import keyboard ^
