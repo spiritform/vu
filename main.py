@@ -796,7 +796,7 @@ if __name__ == "__main__":
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
     from PySide6.QtCore import QUrl, Qt, QEvent, Signal, QTimer
-    from PySide6.QtGui import QIcon
+    from PySide6.QtGui import QIcon, QCursor, QGuiApplication
 
     # Fixed local port held for the lifetime of the process — used as an atomic
     # singleton lock. The actual server runs on a separate port.
@@ -1007,9 +1007,16 @@ if __name__ == "__main__":
             self.hide()
 
         def _handle_show(self, folder: str, rect):
-            if rect:
-                x, y, w, h = rect
-                self.setGeometry(int(x), int(y), int(w), int(h))
+            # Always open big and centered on the active screen. The Explorer
+            # rect (rect) is intentionally ignored — aligning to it puts VU
+            # off-screen when the source window is near the top/edge.
+            screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+            avail = screen.availableGeometry()
+            w = min(1400, avail.width() - 80)
+            h = min(900, avail.height() - 80)
+            x = avail.x() + (avail.width() - w) // 2
+            y = avail.y() + (avail.height() - h) // 2
+            self.setGeometry(int(x), int(y), int(w), int(h))
             self.show()
             self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
             self.activateWindow()
