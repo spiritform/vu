@@ -1,6 +1,6 @@
 # VU
 
-A minimal media viewer that lives in your tray. Press **Ctrl+Shift+V** or set a custom hot-key in the settings (gear icon) and in any
+A minimal media viewer that lives in your tray. Press a global / custom hot-key in the settings (gear icon) and in any
 Windows Explorer / Finder window and VU pops open, pre-scanned to that folder.
 Click tiles to select, compare two side-by-side, heart favorites, export your
 selects as a folder or zip.
