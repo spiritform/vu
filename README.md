@@ -17,7 +17,7 @@ selects as a folder or zip.
 - Heart to favorite, filter by hearted, export selected to a new folder or zip
 - Drag any tile to your desktop to save a copy (filename preserved)
 - Lives in the system tray; window closes to tray, not quits
-- Global hotkey `Ctrl+Shift+V` — opens VU in the focused Explorer / Finder
+- Global / custom hotkey `Ctrl+Shift+V` — opens VU in the focused Explorer / Finder
   folder
 
 ## Running (dev)
